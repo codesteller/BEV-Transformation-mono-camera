@@ -1,0 +1,26 @@
+image_width: 1920
+image_height: 1080
+camera_name: usbcam_econ
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [1318.35305,    0.     ,  938.47121,
+            0.     , 1323.3833 ,  364.48755,
+            0.     ,    0.     ,    1.     ]
+distortion_model: plumb_bob
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [-0.413822, 0.224179, 0.004410, -0.000160, -0.070753]
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [1., 0., 0.,
+         0., 1., 0.,
+         0., 0., 1.]
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [1318.35305,    0.     ,  938.47121,    0.     ,
+            0.     , 1306.78737,  373.44792,    0.     ,
+            0.     ,    0.     ,    1.     ,    0.     ]
