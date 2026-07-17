@@ -12,6 +12,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMainWindow>
+#include <QMouseEvent>
 #include <QPixmap>
 #include <QPushButton>
 #include <QToolButton>
@@ -23,6 +24,7 @@
 #include <QWidget>
 
 #include <opencv2/calib3d.hpp>
+#include <opencv2/aruco.hpp>
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -38,6 +40,7 @@
 #include <cctype>
 #include <array>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <vector>
 
@@ -129,6 +132,66 @@ static void set_toggle_button_visual(QToolButton* button, bool enabled_state) {
     button->setProperty("toggleState", enabled_state ? "on" : "off");
     button->style()->unpolish(button);
     button->style()->polish(button);
+}
+
+class ClickableLabel final : public QLabel {
+public:
+    explicit ClickableLabel(QWidget* parent = nullptr) : QLabel(parent) {}
+
+    std::function<void(const QPoint&)> on_click;
+    std::function<void(const QPoint&)> on_press;
+    std::function<void(const QPoint&)> on_move;
+    std::function<void(const QPoint&)> on_release;
+
+protected:
+    void mousePressEvent(QMouseEvent* event) override {
+        if (on_press) {
+            on_press(event->pos());
+        }
+        if (on_click) {
+            on_click(event->pos());
+        }
+        QLabel::mousePressEvent(event);
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override {
+        if (on_move) {
+            on_move(event->pos());
+        }
+        QLabel::mouseMoveEvent(event);
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (on_release) {
+            on_release(event->pos());
+        }
+        QLabel::mouseReleaseEvent(event);
+    }
+};
+
+static std::vector<int> enumerate_video_indices_linux() {
+    std::vector<int> indices;
+    const std::filesystem::path dev_path("/dev");
+    if (!std::filesystem::exists(dev_path)) {
+        return indices;
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(dev_path)) {
+        const std::string name = entry.path().filename().string();
+        if (name.rfind("video", 0) != 0) {
+            continue;
+        }
+        const std::string suffix = name.substr(5);
+        if (suffix.empty() || !std::all_of(suffix.begin(), suffix.end(), [](unsigned char c) {
+                return std::isdigit(c) != 0;
+            })) {
+            continue;
+        }
+        indices.push_back(std::stoi(suffix));
+    }
+
+    std::sort(indices.begin(), indices.end());
+    return indices;
 }
 
 class IntrinsicsTab final : public QWidget {
@@ -875,25 +938,768 @@ private:
     const std::array<double, 4> k_target_ranges_ = {0.7, 0.7, 0.4, 0.5};
 };
 
-static QWidget* make_homography_tab() {
-    auto* tab = new QWidget();
-    auto* root_layout = new QHBoxLayout(tab);
+class HomographyTab final : public QWidget {
+public:
+    explicit HomographyTab(QWidget* parent = nullptr) : QWidget(parent) {
+        auto* root_layout = new QHBoxLayout(this);
+        root_layout->setSpacing(14);
+        root_layout->setContentsMargins(10, 10, 10, 10);
 
-    auto* left_panel = new QGroupBox("Homography Inputs");
-    auto* left_form = new QFormLayout(left_panel);
-    left_form->addRow("Marker Grid Width (m)", new QLineEdit("2.0"));
-    left_form->addRow("Marker Grid Height (m)", new QLineEdit("2.0"));
-    left_form->addRow("Camera to Ground (m)", new QLineEdit("1.5"));
+        auto* left_panel = new QGroupBox("Homography Calibration");
+        auto* left_form = new QFormLayout(left_panel);
 
-    auto* right_panel = new QGroupBox("View Finder");
-    auto* right_layout = new QVBoxLayout(right_panel);
-    right_layout->addWidget(
-        new QLabel("Live camera feed with ArUco ID overlays will be rendered here."));
+        camera_combo_ = new QComboBox();
+        refresh_btn_ = new QPushButton("Refresh");
+        auto* cam_row = new QWidget();
+        auto* cam_layout = new QHBoxLayout(cam_row);
+        cam_layout->setContentsMargins(0, 0, 0, 0);
+        cam_layout->addWidget(camera_combo_, 1);
+        cam_layout->addWidget(refresh_btn_);
 
-    root_layout->addWidget(left_panel, 1);
-    root_layout->addWidget(right_panel, 3);
-    return tab;
-}
+        mode_combo_ = new QComboBox();
+        mode_combo_->addItem("Manual 4 Points");
+        mode_combo_->addItem("Auto ArUco 4 Markers");
+
+        width_m_ = new QLineEdit("2.0");
+        height_m_ = new QLineEdit("2.0");
+        ground_m_ = new QLineEdit("1.5");
+
+        auto* cam_dist_row = new QWidget();
+        auto* cam_dist_layout = new QHBoxLayout(cam_dist_row);
+        cam_dist_layout->setContentsMargins(0, 0, 0, 0);
+        cam_dist_layout->setSpacing(6);
+        cam_tl_m_ = new QLineEdit("2.8");
+        cam_tr_m_ = new QLineEdit("2.8");
+        cam_br_m_ = new QLineEdit("4.0");
+        cam_bl_m_ = new QLineEdit("4.0");
+        cam_tl_m_->setMaximumWidth(70);
+        cam_tr_m_->setMaximumWidth(70);
+        cam_br_m_->setMaximumWidth(70);
+        cam_bl_m_->setMaximumWidth(70);
+        cam_dist_layout->addWidget(new QLabel("TL"));
+        cam_dist_layout->addWidget(cam_tl_m_);
+        cam_dist_layout->addWidget(new QLabel("TR"));
+        cam_dist_layout->addWidget(cam_tr_m_);
+        cam_dist_layout->addWidget(new QLabel("BR"));
+        cam_dist_layout->addWidget(cam_br_m_);
+        cam_dist_layout->addWidget(new QLabel("BL"));
+        cam_dist_layout->addWidget(cam_bl_m_);
+
+        save_path_ = new QLineEdit("homography.yaml");
+        auto* browse_btn = new QPushButton("Browse");
+        auto* save_row = new QWidget();
+        auto* save_layout = new QHBoxLayout(save_row);
+        save_layout->setContentsMargins(0, 0, 0, 0);
+        save_layout->addWidget(save_path_, 1);
+        save_layout->addWidget(browse_btn);
+
+        auto* ids_row = new QWidget();
+        auto* ids_layout = new QHBoxLayout(ids_row);
+        ids_layout->setContentsMargins(0, 0, 0, 0);
+        ids_layout->setSpacing(6);
+        id_tl_ = new QSpinBox();
+        id_tr_ = new QSpinBox();
+        id_br_ = new QSpinBox();
+        id_bl_ = new QSpinBox();
+        for (auto* box : {id_tl_, id_tr_, id_br_, id_bl_}) {
+            box->setRange(0, 1024);
+        }
+        id_tl_->setValue(0);
+        id_tr_->setValue(1);
+        id_br_->setValue(2);
+        id_bl_->setValue(3);
+        ids_layout->addWidget(new QLabel("TL"));
+        ids_layout->addWidget(id_tl_);
+        ids_layout->addWidget(new QLabel("TR"));
+        ids_layout->addWidget(id_tr_);
+        ids_layout->addWidget(new QLabel("BR"));
+        ids_layout->addWidget(id_br_);
+        ids_layout->addWidget(new QLabel("BL"));
+        ids_layout->addWidget(id_bl_);
+
+        left_form->addRow("Camera", cam_row);
+        left_form->addRow("Mode", mode_combo_);
+        left_form->addRow("Plane Width (m)", width_m_);
+        left_form->addRow("Plane Height (m)", height_m_);
+        left_form->addRow("Camera to Ground (m)", ground_m_);
+        left_form->addRow("Cam->Corner Dist (m, slant)", cam_dist_row);
+        left_form->addRow("Aruco IDs (TL/TR/BR/BL)", ids_row);
+        left_form->addRow("Save YAML", save_row);
+
+        preview_toggle_ = make_toggle_button("Preview");
+        preview_toggle_->setMinimumHeight(34);
+        validation_toggle_ = make_toggle_button("Validation");
+        validation_toggle_->setMinimumHeight(34);
+        detect_btn_ = new QPushButton("Detect 4 Points");
+        clear_btn_ = new QPushButton("Clear Points");
+        solve_btn_ = new QPushButton("Solve + Save");
+
+        auto* controls = new QGroupBox("Actions");
+        auto* controls_layout = new QHBoxLayout(controls);
+        controls_layout->addWidget(preview_toggle_);
+        controls_layout->addWidget(validation_toggle_);
+        controls_layout->addWidget(detect_btn_);
+        controls_layout->addWidget(clear_btn_);
+        controls_layout->addWidget(solve_btn_);
+
+        points_label_ = new QLabel("Selected points: 0/4");
+        distance_label_ = new QLabel("Distance: n/a");
+        status_label_ = new QLabel("Manual mode: click 4 points in order TL, TR, BR, BL.");
+        status_label_->setWordWrap(true);
+
+        auto* left_stack = new QVBoxLayout();
+        left_stack->addWidget(left_panel);
+        left_stack->addWidget(controls);
+        left_stack->addWidget(points_label_);
+        left_stack->addWidget(distance_label_);
+        left_stack->addWidget(status_label_);
+        left_stack->addStretch(1);
+
+        auto* left_container = new QWidget();
+        left_container->setLayout(left_stack);
+
+        auto* right_panel = new QGroupBox("View Finder");
+        auto* right_layout = new QVBoxLayout(right_panel);
+        preview_label_ = new ClickableLabel();
+        preview_label_->setObjectName("previewArea");
+        preview_label_->setAlignment(Qt::AlignCenter);
+        preview_label_->setMinimumSize(800, 520);
+        preview_label_->setText("Preview stopped.");
+        right_layout->addWidget(preview_label_);
+
+        root_layout->addWidget(left_container, 1);
+        root_layout->addWidget(right_panel, 3);
+
+        timer_ = new QTimer(this);
+        timer_->setInterval(33);
+
+        preview_label_->on_click = [this](const QPoint& pos) { on_preview_click(pos); };
+        preview_label_->on_press = [this](const QPoint& pos) { on_preview_press(pos); };
+        preview_label_->on_move = [this](const QPoint& pos) { on_preview_move(pos); };
+        preview_label_->on_release = [this](const QPoint& pos) { on_preview_release(pos); };
+
+        connect(refresh_btn_, &QPushButton::clicked, this, [this]() { refresh_cameras(); });
+        connect(preview_toggle_, &QToolButton::toggled, this, [this](bool checked) {
+            if (checked) {
+                start_preview();
+            } else {
+                stop_preview();
+            }
+        });
+        connect(validation_toggle_, &QToolButton::toggled, this, [this](bool checked) {
+            if (checked) {
+                start_validation();
+            } else {
+                stop_validation();
+            }
+        });
+        connect(detect_btn_, &QPushButton::clicked, this, [this]() { detect_points(); });
+        connect(clear_btn_, &QPushButton::clicked, this, [this]() { clear_points(); });
+        connect(solve_btn_, &QPushButton::clicked, this, [this]() { solve_and_save(); });
+        connect(mode_combo_, &QComboBox::currentTextChanged, this, [this]() {
+            clear_points();
+            status_label_->setText(mode_combo_->currentIndex() == 0
+                ? "Manual mode: click 4 points in order TL, TR, BR, BL."
+                : "Auto mode: click Detect 4 Points to read ArUco IDs and corners.");
+        });
+        connect(browse_btn, &QPushButton::clicked, this, [this]() {
+            const QString path = QFileDialog::getSaveFileName(
+                this,
+                "Save Homography YAML",
+                save_path_->text(),
+                "YAML files (*.yaml *.yml)");
+            if (!path.isEmpty()) {
+                save_path_->setText(path);
+            }
+        });
+        connect(timer_, &QTimer::timeout, this, [this]() { on_frame_tick(); });
+
+        refresh_cameras();
+        apply_ui_state();
+    }
+
+    ~HomographyTab() override {
+        stop_preview();
+    }
+
+private:
+    std::vector<cv::Point2f> world_rect_points() const {
+        bool ok_w = false;
+        bool ok_h = false;
+        const double w = width_m_->text().toDouble(&ok_w);
+        const double h = height_m_->text().toDouble(&ok_h);
+        if (!ok_w || !ok_h || w <= 0.0 || h <= 0.0) {
+            return {};
+        }
+        return {
+            cv::Point2f(0.f, 0.f),
+            cv::Point2f(static_cast<float>(w), 0.f),
+            cv::Point2f(static_cast<float>(w), static_cast<float>(h)),
+            cv::Point2f(0.f, static_cast<float>(h))
+        };
+    }
+
+    bool parse_camera_corner_slant_m(std::array<double, 4>& slant_m, QString& error) const {
+        bool ok_tl = false;
+        bool ok_tr = false;
+        bool ok_br = false;
+        bool ok_bl = false;
+
+        slant_m[0] = cam_tl_m_->text().toDouble(&ok_tl);
+        slant_m[1] = cam_tr_m_->text().toDouble(&ok_tr);
+        slant_m[2] = cam_br_m_->text().toDouble(&ok_br);
+        slant_m[3] = cam_bl_m_->text().toDouble(&ok_bl);
+
+        if (!(ok_tl && ok_tr && ok_br && ok_bl)) {
+            error = "Camera-to-corner distances must be numeric.";
+            return false;
+        }
+        for (double v : slant_m) {
+            if (v <= 0.0) {
+                error = "Camera-to-corner distances must be positive.";
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool estimate_camera_ground_xy(cv::Point2f& camera_xy, std::array<double, 4>& planar_m, QString& error) const {
+        const auto world = world_rect_points();
+        if (world.size() != 4) {
+            error = "Invalid world plane dimensions.";
+            return false;
+        }
+
+        std::array<double, 4> slant_m{};
+        if (!parse_camera_corner_slant_m(slant_m, error)) {
+            return false;
+        }
+
+        bool ok_ground = false;
+        const double ground_h = ground_m_->text().toDouble(&ok_ground);
+        if (!ok_ground || ground_h < 0.0) {
+            error = "Camera to ground must be >= 0.";
+            return false;
+        }
+
+        for (size_t i = 0; i < slant_m.size(); ++i) {
+            const double d = slant_m[i];
+            if (d <= ground_h) {
+                error = "Each cam->corner slant distance must be greater than camera-to-ground height.";
+                return false;
+            }
+            planar_m[i] = std::sqrt(std::max(0.0, d * d - ground_h * ground_h));
+        }
+
+        const cv::Point2f p0 = world[0];
+        const double r0 = planar_m[0];
+        cv::Mat A(3, 2, CV_64F);
+        cv::Mat b(3, 1, CV_64F);
+
+        for (int i = 1; i < 4; ++i) {
+            const cv::Point2f pi = world[i];
+            const double ri = planar_m[i];
+            A.at<double>(i - 1, 0) = 2.0 * (pi.x - p0.x);
+            A.at<double>(i - 1, 1) = 2.0 * (pi.y - p0.y);
+            b.at<double>(i - 1, 0) = (r0 * r0 - ri * ri) - (p0.x * p0.x - pi.x * pi.x) - (p0.y * p0.y - pi.y * pi.y);
+        }
+
+        cv::Mat x;
+        if (!cv::solve(A, b, x, cv::DECOMP_SVD)) {
+            error = "Failed to solve camera ground position from distance constraints.";
+            return false;
+        }
+
+        camera_xy = cv::Point2f(static_cast<float>(x.at<double>(0, 0)), static_cast<float>(x.at<double>(1, 0)));
+        return std::isfinite(camera_xy.x) && std::isfinite(camera_xy.y);
+    }
+
+    void refresh_cameras() {
+        camera_combo_->clear();
+        const auto candidates = enumerate_video_indices_linux();
+        for (const int idx : candidates) {
+            cv::VideoCapture probe(idx, cv::CAP_V4L2);
+            if (probe.isOpened()) {
+                camera_combo_->addItem(QString("Camera %1").arg(idx), idx);
+                probe.release();
+            }
+        }
+        if (camera_combo_->count() == 0) {
+            status_label_->setText("No cameras found.");
+        }
+    }
+
+    void start_preview() {
+        if (camera_combo_->count() == 0) {
+            status_label_->setText("No camera selected.");
+            preview_toggle_->blockSignals(true);
+            preview_toggle_->setChecked(false);
+            preview_toggle_->blockSignals(false);
+            return;
+        }
+
+        const int idx = camera_combo_->currentData().toInt();
+        cap_.open(idx, cv::CAP_V4L2);
+        if (!cap_.isOpened()) {
+            cap_.open(idx, cv::CAP_ANY);
+        }
+        if (!cap_.isOpened()) {
+            status_label_->setText(QString("Failed to open camera %1.").arg(idx));
+            preview_toggle_->blockSignals(true);
+            preview_toggle_->setChecked(false);
+            preview_toggle_->blockSignals(false);
+            return;
+        }
+        timer_->start();
+        set_toggle_button_visual(preview_toggle_, true);
+        apply_ui_state();
+    }
+
+    void stop_preview() {
+        stop_validation();
+        if (timer_->isActive()) {
+            timer_->stop();
+        }
+        if (cap_.isOpened()) {
+            cap_.release();
+        }
+        preview_toggle_->blockSignals(true);
+        preview_toggle_->setChecked(false);
+        preview_toggle_->blockSignals(false);
+        set_toggle_button_visual(preview_toggle_, false);
+        preview_label_->setText("Preview stopped.");
+        apply_ui_state();
+    }
+
+    void start_validation() {
+        if (!cap_.isOpened()) {
+            status_label_->setText("Start preview before enabling validation.");
+            validation_toggle_->blockSignals(true);
+            validation_toggle_->setChecked(false);
+            validation_toggle_->blockSignals(false);
+            set_toggle_button_visual(validation_toggle_, false);
+            return;
+        }
+        if (homography_.empty()) {
+            status_label_->setText("Solve homography first, then enable validation mode.");
+            validation_toggle_->blockSignals(true);
+            validation_toggle_->setChecked(false);
+            validation_toggle_->blockSignals(false);
+            set_toggle_button_visual(validation_toggle_, false);
+            return;
+        }
+        if (!camera_origin_valid_) {
+            status_label_->setText("Camera origin is not solved. Check cam->corner distances and solve again.");
+            validation_toggle_->blockSignals(true);
+            validation_toggle_->setChecked(false);
+            validation_toggle_->blockSignals(false);
+            set_toggle_button_visual(validation_toggle_, false);
+            return;
+        }
+
+        validation_enabled_ = true;
+        status_label_->setText("Validation ON: drag a bbox around an object. Distance uses bbox bottom-center on ground plane.");
+        set_toggle_button_visual(validation_toggle_, true);
+        apply_ui_state();
+    }
+
+    void stop_validation() {
+        validation_enabled_ = false;
+        dragging_bbox_ = false;
+        bbox_valid_ = false;
+        distance_label_->setText("Distance: n/a");
+        set_toggle_button_visual(validation_toggle_, false);
+        apply_ui_state();
+    }
+
+    QPointF label_to_frame(const QPoint& p) const {
+        if (current_frame_.empty()) {
+            return QPointF(-1, -1);
+        }
+
+        const QSize widget_size = preview_label_->size();
+        const double sx = static_cast<double>(widget_size.width()) / current_frame_.cols;
+        const double sy = static_cast<double>(widget_size.height()) / current_frame_.rows;
+        const double scale = std::min(sx, sy);
+        const int draw_w = static_cast<int>(current_frame_.cols * scale);
+        const int draw_h = static_cast<int>(current_frame_.rows * scale);
+        const int off_x = (widget_size.width() - draw_w) / 2;
+        const int off_y = (widget_size.height() - draw_h) / 2;
+
+        if (p.x() < off_x || p.y() < off_y || p.x() >= off_x + draw_w || p.y() >= off_y + draw_h) {
+            return QPointF(-1, -1);
+        }
+
+        const double x = (p.x() - off_x) / scale;
+        const double y = (p.y() - off_y) / scale;
+        return QPointF(x, y);
+    }
+
+    bool compute_distance_from_bbox() {
+        if (homography_.empty() || !bbox_valid_ || !camera_origin_valid_) {
+            return false;
+        }
+        const float x0 = std::min(bbox_p0_.x, bbox_p1_.x);
+        const float y0 = std::min(bbox_p0_.y, bbox_p1_.y);
+        const float x1 = std::max(bbox_p0_.x, bbox_p1_.x);
+        const float y1 = std::max(bbox_p0_.y, bbox_p1_.y);
+
+        const cv::Point2f foot((x0 + x1) * 0.5f, y1);
+        std::vector<cv::Point2f> image_pts = {foot};
+        std::vector<cv::Point2f> world_pts;
+        cv::perspectiveTransform(image_pts, world_pts, homography_);
+        if (world_pts.empty()) {
+            return false;
+        }
+
+        last_world_pt_ = world_pts[0];
+        const double dx = static_cast<double>(last_world_pt_.x - camera_ground_xy_.x);
+        const double dy = static_cast<double>(last_world_pt_.y - camera_ground_xy_.y);
+        last_distance_m_ = std::sqrt(dx * dx + dy * dy);
+        distance_label_->setText(QString("Distance: %1 m (x=%2, y=%3)")
+            .arg(last_distance_m_, 0, 'f', 2)
+            .arg(last_world_pt_.x, 0, 'f', 2)
+            .arg(last_world_pt_.y, 0, 'f', 2));
+        return true;
+    }
+
+    void on_preview_press(const QPoint& pos) {
+        if (!validation_enabled_ || current_frame_.empty()) {
+            return;
+        }
+        const QPointF p = label_to_frame(pos);
+        if (p.x() < 0 || p.y() < 0) {
+            return;
+        }
+        dragging_bbox_ = true;
+        bbox_valid_ = false;
+        bbox_p0_ = cv::Point2f(static_cast<float>(p.x()), static_cast<float>(p.y()));
+        bbox_p1_ = bbox_p0_;
+    }
+
+    void on_preview_move(const QPoint& pos) {
+        if (!validation_enabled_ || !dragging_bbox_) {
+            return;
+        }
+        const QPointF p = label_to_frame(pos);
+        if (p.x() < 0 || p.y() < 0) {
+            return;
+        }
+        bbox_p1_ = cv::Point2f(static_cast<float>(p.x()), static_cast<float>(p.y()));
+    }
+
+    void on_preview_release(const QPoint& pos) {
+        if (!validation_enabled_ || !dragging_bbox_) {
+            return;
+        }
+        dragging_bbox_ = false;
+        const QPointF p = label_to_frame(pos);
+        if (p.x() < 0 || p.y() < 0) {
+            return;
+        }
+        bbox_p1_ = cv::Point2f(static_cast<float>(p.x()), static_cast<float>(p.y()));
+
+        const float w = std::abs(bbox_p1_.x - bbox_p0_.x);
+        const float h = std::abs(bbox_p1_.y - bbox_p0_.y);
+        bbox_valid_ = (w >= 8.0f && h >= 8.0f);
+        if (!bbox_valid_) {
+            status_label_->setText("Validation bbox too small. Draw a larger box.");
+            return;
+        }
+
+        if (!compute_distance_from_bbox()) {
+            status_label_->setText("Failed to estimate distance from bbox.");
+            return;
+        }
+        status_label_->setText(QString("Estimated distance: %1 m. Compare this with tape measurement.")
+            .arg(last_distance_m_, 0, 'f', 2));
+    }
+
+    void on_preview_click(const QPoint& pos) {
+        if (validation_enabled_ || mode_combo_->currentIndex() != 0 || !cap_.isOpened()) {
+            return;
+        }
+
+        const QPointF mapped = label_to_frame(pos);
+        if (mapped.x() < 0 || mapped.y() < 0) {
+            return;
+        }
+        if (manual_points_.size() >= 4) {
+            return;
+        }
+
+        manual_points_.push_back(cv::Point2f(static_cast<float>(mapped.x()), static_cast<float>(mapped.y())));
+        image_points_ = manual_points_;
+        points_label_->setText(QString("Selected points: %1/4").arg(manual_points_.size()));
+        status_label_->setText("Manual point added.");
+        apply_ui_state();
+    }
+
+    void detect_points() {
+        if (!cap_.isOpened() || current_frame_.empty()) {
+            status_label_->setText("Start preview before detection.");
+            return;
+        }
+
+        if (mode_combo_->currentIndex() == 0) {
+            status_label_->setText("Manual mode: click 4 points on the image.");
+            return;
+        }
+
+        cv::aruco::Dictionary dict_raw = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_4X4_50);
+        cv::Ptr<cv::aruco::Dictionary> dict = cv::makePtr<cv::aruco::Dictionary>(dict_raw);
+        std::vector<std::vector<cv::Point2f>> corners;
+        std::vector<int> ids;
+        cv::aruco::detectMarkers(current_frame_, dict, corners, ids);
+
+        if (ids.empty()) {
+            status_label_->setText("No ArUco markers detected.");
+            return;
+        }
+
+        const std::array<int, 4> wanted = {
+            id_tl_->value(), id_tr_->value(), id_br_->value(), id_bl_->value()
+        };
+        std::array<cv::Point2f, 4> centers{};
+        std::array<bool, 4> found = {false, false, false, false};
+
+        for (size_t i = 0; i < ids.size(); ++i) {
+            for (int k = 0; k < 4; ++k) {
+                if (ids[i] == wanted[k]) {
+                    cv::Point2f c(0.f, 0.f);
+                    for (const auto& p : corners[i]) {
+                        c += p;
+                    }
+                    c *= 0.25f;
+                    centers[k] = c;
+                    found[k] = true;
+                }
+            }
+        }
+
+        if (!std::all_of(found.begin(), found.end(), [](bool v) { return v; })) {
+            status_label_->setText("Could not find all four configured marker IDs.");
+            return;
+        }
+
+        image_points_ = {centers[0], centers[1], centers[2], centers[3]};
+        points_label_->setText("Selected points: 4/4");
+        status_label_->setText("Auto 4-point detection successful.");
+        apply_ui_state();
+    }
+
+    void clear_points() {
+        stop_validation();
+        manual_points_.clear();
+        image_points_.clear();
+        homography_.release();
+        camera_origin_valid_ = false;
+        points_label_->setText("Selected points: 0/4");
+        distance_label_->setText("Distance: n/a");
+        apply_ui_state();
+    }
+
+    void solve_and_save() {
+        if (image_points_.size() != 4) {
+            status_label_->setText("Need exactly 4 image points.");
+            return;
+        }
+
+        const auto world = world_rect_points();
+        if (world.size() != 4) {
+            status_label_->setText("Invalid plane width/height.");
+            return;
+        }
+
+        homography_ = cv::findHomography(image_points_, world, cv::RANSAC);
+        if (homography_.empty()) {
+            status_label_->setText("Homography solve failed.");
+            return;
+        }
+
+        std::array<double, 4> camera_corner_ground_m{};
+        QString camera_origin_error;
+        if (!estimate_camera_ground_xy(camera_ground_xy_, camera_corner_ground_m, camera_origin_error)) {
+            camera_origin_valid_ = false;
+            status_label_->setText(QString("Homography solved, but camera ground origin failed: %1").arg(camera_origin_error));
+            apply_ui_state();
+            return;
+        }
+        camera_origin_valid_ = true;
+
+        const std::filesystem::path out(save_path_->text().toStdString());
+        try {
+            if (out.has_parent_path() && !out.parent_path().empty()) {
+                std::filesystem::create_directories(out.parent_path());
+            }
+        } catch (const std::exception&) {
+            status_label_->setText("Invalid output path.");
+            return;
+        }
+
+        std::ofstream fs(out.string(), std::ios::out | std::ios::trunc);
+        if (!fs.is_open()) {
+            status_label_->setText("Failed to open output YAML path.");
+            return;
+        }
+
+        fs << std::fixed << std::setprecision(6);
+        fs << "image_width: " << current_frame_.cols << "\n";
+        fs << "image_height: " << current_frame_.rows << "\n";
+        fs << "mode: " << (mode_combo_->currentIndex() == 0 ? "manual" : "aruco_auto") << "\n";
+        fs << "camera_to_ground_m: " << ground_m_->text().toStdString() << "\n";
+        fs << "plane_width_m: " << width_m_->text().toStdString() << "\n";
+        fs << "plane_height_m: " << height_m_->text().toStdString() << "\n";
+          fs << "camera_ground_xy_m: [" << camera_ground_xy_.x << ", " << camera_ground_xy_.y << "]\n";
+          fs << "camera_to_corner_slant_m: ["
+              << cam_tl_m_->text().toStdString() << ", "
+              << cam_tr_m_->text().toStdString() << ", "
+              << cam_br_m_->text().toStdString() << ", "
+              << cam_bl_m_->text().toStdString() << "]\n";
+          fs << "camera_to_corner_ground_m: ["
+              << camera_corner_ground_m[0] << ", "
+              << camera_corner_ground_m[1] << ", "
+              << camera_corner_ground_m[2] << ", "
+              << camera_corner_ground_m[3] << "]\n";
+        fs << "homography_matrix:\n";
+        fs << "  rows: 3\n";
+        fs << "  cols: 3\n";
+        fs << "  data: ["
+           << homography_.at<double>(0, 0) << ", " << homography_.at<double>(0, 1) << ", " << homography_.at<double>(0, 2) << ",\n"
+           << "         " << homography_.at<double>(1, 0) << ", " << homography_.at<double>(1, 1) << ", " << homography_.at<double>(1, 2) << ",\n"
+           << "         " << homography_.at<double>(2, 0) << ", " << homography_.at<double>(2, 1) << ", " << homography_.at<double>(2, 2) << "]\n";
+        fs.close();
+
+        status_label_->setText(QString("Homography saved: %1 | camera ground XY=(%2, %3)")
+            .arg(QString::fromStdString(out.string()))
+            .arg(camera_ground_xy_.x, 0, 'f', 2)
+            .arg(camera_ground_xy_.y, 0, 'f', 2));
+    }
+
+    void on_frame_tick() {
+        if (!cap_.isOpened()) {
+            return;
+        }
+        cv::Mat frame;
+        if (!cap_.read(frame) || frame.empty()) {
+            status_label_->setText("Frame read failed.");
+            return;
+        }
+
+        current_frame_ = frame.clone();
+        cv::Mat overlay = frame.clone();
+
+        for (size_t i = 0; i < image_points_.size(); ++i) {
+            cv::circle(overlay, image_points_[i], 7, cv::Scalar(30, 220, 30), -1);
+            cv::putText(
+                overlay,
+                std::to_string(i),
+                image_points_[i] + cv::Point2f(8.f, -8.f),
+                cv::FONT_HERSHEY_SIMPLEX,
+                0.6,
+                cv::Scalar(20, 230, 230),
+                2);
+        }
+        if (image_points_.size() == 4) {
+            for (int i = 0; i < 4; ++i) {
+                cv::line(overlay, image_points_[i], image_points_[(i + 1) % 4], cv::Scalar(40, 200, 255), 2);
+            }
+        }
+
+        if (validation_enabled_ && (dragging_bbox_ || bbox_valid_)) {
+            const float x0 = std::min(bbox_p0_.x, bbox_p1_.x);
+            const float y0 = std::min(bbox_p0_.y, bbox_p1_.y);
+            const float x1 = std::max(bbox_p0_.x, bbox_p1_.x);
+            const float y1 = std::max(bbox_p0_.y, bbox_p1_.y);
+
+            cv::rectangle(
+                overlay,
+                cv::Rect2f(cv::Point2f(x0, y0), cv::Point2f(x1, y1)),
+                cv::Scalar(40, 255, 120),
+                2);
+
+            const cv::Point2f foot((x0 + x1) * 0.5f, y1);
+            cv::circle(overlay, foot, 5, cv::Scalar(0, 220, 255), -1);
+
+            if (bbox_valid_) {
+                const std::string text = "dist=" + std::to_string(last_distance_m_).substr(0, 4) + "m";
+                cv::putText(
+                    overlay,
+                    text,
+                    cv::Point(static_cast<int>(x0), std::max(20, static_cast<int>(y0) - 8)),
+                    cv::FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    cv::Scalar(30, 255, 255),
+                    2);
+            }
+        }
+
+        const QImage image = mat_to_qimage(overlay);
+        preview_label_->setPixmap(QPixmap::fromImage(image).scaled(
+            preview_label_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+
+    void apply_ui_state() {
+        const bool preview_on = cap_.isOpened();
+        const bool can_validate = preview_on && !homography_.empty() && camera_origin_valid_;
+        set_toggle_button_visual(preview_toggle_, preview_on);
+        set_toggle_button_visual(validation_toggle_, validation_enabled_);
+        refresh_btn_->setEnabled(!preview_on);
+        camera_combo_->setEnabled(!preview_on);
+        validation_toggle_->setEnabled(can_validate);
+        detect_btn_->setEnabled(preview_on && !validation_enabled_);
+        clear_btn_->setEnabled(!validation_enabled_);
+        solve_btn_->setEnabled(preview_on && image_points_.size() == 4 && !validation_enabled_);
+        mode_combo_->setEnabled(!validation_enabled_);
+        id_tl_->setEnabled(!validation_enabled_);
+        id_tr_->setEnabled(!validation_enabled_);
+        id_br_->setEnabled(!validation_enabled_);
+        id_bl_->setEnabled(!validation_enabled_);
+    }
+
+private:
+    QComboBox* camera_combo_ = nullptr;
+    QPushButton* refresh_btn_ = nullptr;
+    QComboBox* mode_combo_ = nullptr;
+    QLineEdit* width_m_ = nullptr;
+    QLineEdit* height_m_ = nullptr;
+    QLineEdit* ground_m_ = nullptr;
+    QLineEdit* cam_tl_m_ = nullptr;
+    QLineEdit* cam_tr_m_ = nullptr;
+    QLineEdit* cam_br_m_ = nullptr;
+    QLineEdit* cam_bl_m_ = nullptr;
+    QLineEdit* save_path_ = nullptr;
+    QSpinBox* id_tl_ = nullptr;
+    QSpinBox* id_tr_ = nullptr;
+    QSpinBox* id_br_ = nullptr;
+    QSpinBox* id_bl_ = nullptr;
+
+    QToolButton* preview_toggle_ = nullptr;
+    QToolButton* validation_toggle_ = nullptr;
+    QPushButton* detect_btn_ = nullptr;
+    QPushButton* clear_btn_ = nullptr;
+    QPushButton* solve_btn_ = nullptr;
+    QLabel* points_label_ = nullptr;
+    QLabel* distance_label_ = nullptr;
+    QLabel* status_label_ = nullptr;
+    ClickableLabel* preview_label_ = nullptr;
+    QTimer* timer_ = nullptr;
+
+    cv::VideoCapture cap_;
+    cv::Mat current_frame_;
+    std::vector<cv::Point2f> manual_points_;
+    std::vector<cv::Point2f> image_points_;
+    cv::Mat homography_;
+    bool validation_enabled_ = false;
+    bool dragging_bbox_ = false;
+    bool bbox_valid_ = false;
+    cv::Point2f bbox_p0_;
+    cv::Point2f bbox_p1_;
+    cv::Point2f last_world_pt_;
+    cv::Point2f camera_ground_xy_;
+    bool camera_origin_valid_ = false;
+    double last_distance_m_ = 0.0;
+};
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
@@ -993,7 +1799,7 @@ int main(int argc, char** argv) {
 
     auto* tabs = new QTabWidget();
     tabs->addTab(new IntrinsicsTab(), "Intrinsics");
-    tabs->addTab(make_homography_tab(), "Homography");
+    tabs->addTab(new HomographyTab(), "Homography");
 
     auto* central = new QWidget();
     auto* root_layout = new QVBoxLayout(central);

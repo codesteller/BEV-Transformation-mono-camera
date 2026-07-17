@@ -1,0 +1,15 @@
+image_width: 640
+image_height: 480
+mode: manual
+camera_to_ground_m: 0.8
+plane_width_m: 1.0
+plane_height_m: 1.0
+camera_ground_xy_m: [0.500000, -3.580000]
+camera_to_corner_slant_m: [2.8, 2.8, 4.0, 4.0]
+camera_to_corner_ground_m: [2.683282, 2.683282, 3.919184, 3.919184]
+homography_matrix:
+  rows: 3
+  cols: 3
+  data: [-0.004510, -0.001448, 1.641820,
+         -0.000000, -0.019488, 6.945574,
+         0.000092, -0.005442, 1.000000]
