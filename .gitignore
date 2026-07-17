@@ -1,0 +1,8 @@
+# Build Directories
+*/build
+.vscode
+
+# Images
+*.jpg
+*.jpeg
+*.png

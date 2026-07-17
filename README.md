@@ -3,7 +3,8 @@ It converts a video input to BEV representation for depth estimation and object 
 
 ## Features:
 - [ ] Monocular camera intrinsics calibration based on OpenCV
-    - [ ] UI based on QT to do the calibration like the OpenCV calibration tool on ROS with Skew, Scale, X, Y.
+    - [ ] UI based on QT to do the calibration like the OpenCV calibration tool on ROS with Skew, Scale, X, Y. UI to also have a view finder to show the camera image and detect the chessboard pattern for calibration.
+    - [ ] On one side (left) of the window, put text boxes to enter the Chessboard pattern size (number of inner corners per chessboard row and column) and the size of a square in meters.
     - [ ] Save the calibration result to a YAML file.
     - [ ] Once Calibrated use intrinsics to undistort the image.
 - [ ] Monocular camera extrinsics calibration based on OpenCV 4-Point Homography transformation.
@@ -13,4 +14,10 @@ It converts a video input to BEV representation for depth estimation and object 
     - [ ] Once Calibrated use extrinsics to transform the image to BEV transformation.
     - [ ] Use the BEV transformation to do depth estimation and object detection.
     
+## Dependencies:
+- OpenCV 4.10.0 or higher
+- CMake 3.10 or higher
+- Qt5 
+- C++17
+- cuDNN (if using GPU acceleration for depth estimation and object detection)
 
