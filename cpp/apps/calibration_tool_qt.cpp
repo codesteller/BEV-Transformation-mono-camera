@@ -42,6 +42,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <set>
 #include <vector>
 
 static QImage mat_to_qimage(const cv::Mat& mat) {
@@ -52,6 +53,104 @@ static QImage mat_to_qimage(const cv::Mat& mat) {
     cv::cvtColor(mat, rgb, cv::COLOR_BGR2RGB);
     return QImage(rgb.data, rgb.cols, rgb.rows, static_cast<int>(rgb.step), QImage::Format_RGB888)
         .copy();
+}
+
+struct IntrinsicsData {
+    int image_width = 0;
+    int image_height = 0;
+    cv::Mat camera_matrix;      // 3x3 CV_64F (K)
+    cv::Mat dist_coeffs;        // Nx1 CV_64F (D)
+    cv::Mat projection_matrix;  // 3x3 CV_64F, optional (top-left of ROS-style 3x4 P)
+};
+
+// Reads the "key:\n  ...\n  data: [v0, v1, ...]" block written by
+// IntrinsicsTab::calibrate_and_save(). Not a general YAML parser -- tailored to that exact
+// hand-written schema, searching from block_pos for the next "data: [ ... ]" list.
+static std::vector<double> extract_yaml_data_list(const std::string& text, size_t block_pos) {
+    std::vector<double> values;
+    if (block_pos == std::string::npos) {
+        return values;
+    }
+    const size_t data_pos = text.find("data:", block_pos);
+    if (data_pos == std::string::npos) {
+        return values;
+    }
+    const size_t open = text.find('[', data_pos);
+    const size_t close = (open == std::string::npos) ? std::string::npos : text.find(']', open);
+    if (open == std::string::npos || close == std::string::npos) {
+        return values;
+    }
+    std::stringstream ss(text.substr(open + 1, close - open - 1));
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+        try {
+            values.push_back(std::stod(token));
+        } catch (const std::exception&) {
+        }
+    }
+    return values;
+}
+
+static bool load_intrinsics_yaml(const std::string& path, IntrinsicsData& out, QString& error) {
+    std::ifstream fs(path);
+    if (!fs.is_open()) {
+        error = "Could not open file.";
+        return false;
+    }
+    std::ostringstream buffer;
+    buffer << fs.rdbuf();
+    const std::string text = buffer.str();
+
+    auto parse_int_after = [&](const std::string& key) -> int {
+        const size_t pos = text.find(key);
+        if (pos == std::string::npos) {
+            return -1;
+        }
+        try {
+            return std::stoi(text.substr(pos + key.size()));
+        } catch (const std::exception&) {
+            return -1;
+        }
+    };
+
+    out.image_width = parse_int_after("image_width:");
+    out.image_height = parse_int_after("image_height:");
+    if (out.image_width <= 0 || out.image_height <= 0) {
+        error = "Missing or invalid image_width/image_height.";
+        return false;
+    }
+
+    const auto k_values = extract_yaml_data_list(text, text.find("camera_matrix:"));
+    if (k_values.size() != 9) {
+        error = "camera_matrix must have 9 values.";
+        return false;
+    }
+    out.camera_matrix = cv::Mat(3, 3, CV_64F);
+    for (int i = 0; i < 9; ++i) {
+        out.camera_matrix.at<double>(i / 3, i % 3) = k_values[static_cast<size_t>(i)];
+    }
+
+    const auto d_values = extract_yaml_data_list(text, text.find("distortion_coefficients:"));
+    if (d_values.empty()) {
+        error = "distortion_coefficients missing.";
+        return false;
+    }
+    out.dist_coeffs = cv::Mat(static_cast<int>(d_values.size()), 1, CV_64F);
+    for (size_t i = 0; i < d_values.size(); ++i) {
+        out.dist_coeffs.at<double>(static_cast<int>(i), 0) = d_values[i];
+    }
+
+    const auto p_values = extract_yaml_data_list(text, text.find("projection_matrix:"));
+    if (p_values.size() == 12) {
+        out.projection_matrix = cv::Mat(3, 3, CV_64F);
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                out.projection_matrix.at<double>(r, c) = p_values[static_cast<size_t>(r * 4 + c)];
+            }
+        }
+    }
+
+    return true;
 }
 
 static QWidget* make_brand_header() {
@@ -213,6 +312,14 @@ public:
         cam_row_layout->addWidget(camera_combo_, 1);
         cam_row_layout->addWidget(refresh_cameras_btn_);
 
+        resolution_combo_ = new QComboBox();
+        refresh_resolutions_btn_ = new QPushButton("Scan Modes");
+        auto* resolution_row = new QWidget();
+        auto* resolution_row_layout = new QHBoxLayout(resolution_row);
+        resolution_row_layout->setContentsMargins(0, 0, 0, 0);
+        resolution_row_layout->addWidget(resolution_combo_, 1);
+        resolution_row_layout->addWidget(refresh_resolutions_btn_);
+
         corners_x_ = new QSpinBox();
         corners_x_->setRange(3, 30);
         corners_x_->setValue(10);
@@ -238,6 +345,7 @@ public:
         frame_folder_layout->addWidget(frame_folder_, 1);
 
         left_form->addRow("Camera", cam_row);
+        left_form->addRow("Resolution", resolution_row);
         left_form->addRow("Chessboard Inner Corners X", corners_x_);
         left_form->addRow("Chessboard Inner Corners Y", corners_y_);
         left_form->addRow("Square Size (m)", square_size_);
@@ -332,6 +440,13 @@ public:
         timer_->setInterval(33);
 
         connect(refresh_cameras_btn_, &QPushButton::clicked, this, [this]() { refresh_cameras(); });
+        connect(refresh_resolutions_btn_, &QPushButton::clicked, this, [this]() { refresh_resolutions(); });
+        connect(camera_combo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
+            refresh_resolutions();
+        });
+        connect(resolution_combo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
+            apply_selected_resolution();
+        });
         connect(preview_btn_, &QToolButton::toggled, this, [this](bool checked) {
             if (checked) {
                 start_preview();
@@ -566,6 +681,120 @@ private:
         return indices;
     }
 
+    static std::vector<cv::Size> candidate_resolutions() {
+        return {
+            cv::Size(320, 240),
+            cv::Size(640, 480),
+            cv::Size(800, 600),
+            cv::Size(960, 540),
+            cv::Size(1024, 576),
+            cv::Size(1024, 768),
+            cv::Size(1280, 720),
+            cv::Size(1280, 800),
+            cv::Size(1280, 960),
+            cv::Size(1600, 900),
+            cv::Size(1920, 1080)
+        };
+    }
+
+    std::vector<cv::Size> probe_camera_resolutions(int device_idx) const {
+        std::vector<cv::Size> supported;
+        cv::VideoCapture probe(device_idx, cv::CAP_V4L2);
+        if (!probe.isOpened()) {
+            probe.open(device_idx, cv::CAP_ANY);
+        }
+        if (!probe.isOpened()) {
+            return supported;
+        }
+
+        probe.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+        std::set<std::pair<int, int>> unique_modes;
+        for (const auto& option : candidate_resolutions()) {
+            probe.set(cv::CAP_PROP_FRAME_WIDTH, option.width);
+            probe.set(cv::CAP_PROP_FRAME_HEIGHT, option.height);
+
+            const int actual_w = static_cast<int>(std::lround(probe.get(cv::CAP_PROP_FRAME_WIDTH)));
+            const int actual_h = static_cast<int>(std::lround(probe.get(cv::CAP_PROP_FRAME_HEIGHT)));
+            if (actual_w <= 0 || actual_h <= 0) {
+                continue;
+            }
+
+            const bool close_to_requested =
+                std::abs(actual_w - option.width) <= 16 && std::abs(actual_h - option.height) <= 16;
+            if (!close_to_requested) {
+                continue;
+            }
+
+            if (unique_modes.insert({actual_w, actual_h}).second) {
+                supported.emplace_back(actual_w, actual_h);
+            }
+        }
+
+        std::sort(supported.begin(), supported.end(), [](const cv::Size& a, const cv::Size& b) {
+            if (a.width * a.height == b.width * b.height) {
+                return a.width < b.width;
+            }
+            return a.width * a.height < b.width * b.height;
+        });
+        return supported;
+    }
+
+    void refresh_resolutions() {
+        resolution_combo_->blockSignals(true);
+        resolution_combo_->clear();
+        resolution_combo_->addItem("Default (driver)", -1);
+
+        if (camera_combo_->count() == 0) {
+            resolution_combo_->setEnabled(false);
+            refresh_resolutions_btn_->setEnabled(false);
+            resolution_combo_->blockSignals(false);
+            return;
+        }
+
+        const int device_idx = camera_combo_->currentData().toInt();
+        const auto supported = probe_camera_resolutions(device_idx);
+        for (const auto& mode : supported) {
+            const QString label = QString("%1 x %2").arg(mode.width).arg(mode.height);
+            resolution_combo_->addItem(label, (mode.width << 16) | mode.height);
+        }
+
+        int preferred_idx = 0;
+        for (int i = 1; i < resolution_combo_->count(); ++i) {
+            if (resolution_combo_->itemText(i).startsWith("1280 x 720")) {
+                preferred_idx = i;
+                break;
+            }
+        }
+        resolution_combo_->setCurrentIndex(preferred_idx);
+        resolution_combo_->setEnabled(true);
+        refresh_resolutions_btn_->setEnabled(true);
+        resolution_combo_->blockSignals(false);
+    }
+
+    void apply_selected_resolution() {
+        if (!cap_.isOpened() || resolution_combo_->count() == 0) {
+            return;
+        }
+
+        const int packed = resolution_combo_->currentData().toInt();
+        if (packed > 0) {
+            const int width = (packed >> 16) & 0xFFFF;
+            const int height = packed & 0xFFFF;
+            // Raw YUYV is USB-bandwidth-limited on most UVC cams (often capped at 640x480);
+            // MJPG must be selected before width/height to unlock 720p/1080p modes, matching
+            // the negotiation used by probe_camera_resolutions().
+            cap_.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+            cap_.set(cv::CAP_PROP_FRAME_WIDTH, width);
+            cap_.set(cv::CAP_PROP_FRAME_HEIGHT, height);
+        }
+
+        const int actual_w = static_cast<int>(std::lround(cap_.get(cv::CAP_PROP_FRAME_WIDTH)));
+        const int actual_h = static_cast<int>(std::lround(cap_.get(cv::CAP_PROP_FRAME_HEIGHT)));
+        if (actual_w > 0 && actual_h > 0) {
+            status_label_->setText(QString("Active capture resolution: %1 x %2").arg(actual_w).arg(actual_h));
+        }
+    }
+
     void refresh_cameras() {
         camera_combo_->clear();
         const std::vector<int> candidates = enumerate_video_indices();
@@ -578,8 +807,10 @@ private:
         }
         if (camera_combo_->count() == 0) {
             status_label_->setText("No cameras found. Connect a camera and press Refresh.");
+            refresh_resolutions();
         } else {
             status_label_->setText(QString("Found %1 camera(s).").arg(camera_combo_->count()));
+            refresh_resolutions();
         }
     }
 
@@ -599,13 +830,18 @@ private:
             return;
         }
 
+        apply_selected_resolution();
+
         preview_btn_->blockSignals(true);
         preview_btn_->setChecked(true);
         preview_btn_->blockSignals(false);
         set_toggle_button_visual(preview_btn_, true);
 
         timer_->start();
-        status_label_->setText(QString("Preview started on camera %1.").arg(device_idx));
+        const int actual_w = static_cast<int>(std::lround(cap_.get(cv::CAP_PROP_FRAME_WIDTH)));
+        const int actual_h = static_cast<int>(std::lround(cap_.get(cv::CAP_PROP_FRAME_HEIGHT)));
+        status_label_->setText(
+            QString("Preview started on camera %1 at %2 x %3.").arg(device_idx).arg(actual_w).arg(actual_h));
         apply_ui_state();
     }
 
@@ -873,6 +1109,8 @@ private:
 
         camera_combo_->setEnabled(!preview_on);
         refresh_cameras_btn_->setEnabled(!preview_on);
+        resolution_combo_->setEnabled(!preview_on && camera_combo_->count() > 0);
+        refresh_resolutions_btn_->setEnabled(!preview_on && camera_combo_->count() > 0);
         set_toggle_button_visual(preview_btn_, preview_on);
         set_toggle_button_visual(auto_capture_btn_, auto_on);
         if (preview_on) {
@@ -894,7 +1132,9 @@ private:
 
 private:
     QComboBox* camera_combo_ = nullptr;
+    QComboBox* resolution_combo_ = nullptr;
     QPushButton* refresh_cameras_btn_ = nullptr;
+    QPushButton* refresh_resolutions_btn_ = nullptr;
     QSpinBox* corners_x_ = nullptr;
     QSpinBox* corners_y_ = nullptr;
     QLineEdit* square_size_ = nullptr;
@@ -955,6 +1195,16 @@ public:
         cam_layout->setContentsMargins(0, 0, 0, 0);
         cam_layout->addWidget(camera_combo_, 1);
         cam_layout->addWidget(refresh_btn_);
+
+        intrinsics_path_ = new QLineEdit("intrinsics.yaml");
+        auto* browse_intrinsics_btn = new QPushButton("Browse");
+        auto* reload_intrinsics_btn = new QPushButton("Reload");
+        auto* intrinsics_row = new QWidget();
+        auto* intrinsics_layout = new QHBoxLayout(intrinsics_row);
+        intrinsics_layout->setContentsMargins(0, 0, 0, 0);
+        intrinsics_layout->addWidget(intrinsics_path_, 1);
+        intrinsics_layout->addWidget(browse_intrinsics_btn);
+        intrinsics_layout->addWidget(reload_intrinsics_btn);
 
         mode_combo_ = new QComboBox();
         mode_combo_->addItem("Manual 4 Points");
@@ -1018,6 +1268,7 @@ public:
         ids_layout->addWidget(id_bl_);
 
         left_form->addRow("Camera", cam_row);
+        left_form->addRow("Intrinsics YAML", intrinsics_row);
         left_form->addRow("Mode", mode_combo_);
         left_form->addRow("Plane Width (m)", width_m_);
         left_form->addRow("Plane Height (m)", height_m_);
@@ -1044,11 +1295,14 @@ public:
 
         points_label_ = new QLabel("Selected points: 0/4");
         distance_label_ = new QLabel("Distance: n/a");
+        intrinsics_status_label_ = new QLabel("Intrinsics: not loaded. Load an intrinsics YAML before detecting points.");
+        intrinsics_status_label_->setWordWrap(true);
         status_label_ = new QLabel("Manual mode: click 4 points in order TL, TR, BR, BL.");
         status_label_->setWordWrap(true);
 
         auto* left_stack = new QVBoxLayout();
         left_stack->addWidget(left_panel);
+        left_stack->addWidget(intrinsics_status_label_);
         left_stack->addWidget(controls);
         left_stack->addWidget(points_label_);
         left_stack->addWidget(distance_label_);
@@ -1079,6 +1333,15 @@ public:
         preview_label_->on_release = [this](const QPoint& pos) { on_preview_release(pos); };
 
         connect(refresh_btn_, &QPushButton::clicked, this, [this]() { refresh_cameras(); });
+        connect(browse_intrinsics_btn, &QPushButton::clicked, this, [this]() {
+            const QString path = QFileDialog::getOpenFileName(
+                this, "Load Intrinsics YAML", intrinsics_path_->text(), "YAML files (*.yaml *.yml)");
+            if (!path.isEmpty()) {
+                intrinsics_path_->setText(path);
+                load_intrinsics();
+            }
+        });
+        connect(reload_intrinsics_btn, &QPushButton::clicked, this, [this]() { load_intrinsics(); });
         connect(preview_toggle_, &QToolButton::toggled, this, [this](bool checked) {
             if (checked) {
                 start_preview();
@@ -1214,6 +1477,36 @@ private:
         return std::isfinite(camera_xy.x) && std::isfinite(camera_xy.y);
     }
 
+    void load_intrinsics() {
+        IntrinsicsData data;
+        QString error;
+        if (!load_intrinsics_yaml(intrinsics_path_->text().toStdString(), data, error)) {
+            intrinsics_loaded_ = false;
+            intrinsics_status_label_->setText(QString("Intrinsics: failed to load (%1)").arg(error));
+            apply_ui_state();
+            return;
+        }
+
+        intrinsics_image_size_ = cv::Size(data.image_width, data.image_height);
+        intrinsics_camera_matrix_ = data.camera_matrix;
+        intrinsics_dist_coeffs_ = data.dist_coeffs;
+        intrinsics_projection_matrix_ = data.projection_matrix;
+        intrinsics_loaded_ = true;
+
+        intrinsics_status_label_->setText(QString("Intrinsics loaded: %1x%2, fx=%3, fy=%4")
+            .arg(data.image_width)
+            .arg(data.image_height)
+            .arg(intrinsics_camera_matrix_.at<double>(0, 0), 0, 'f', 2)
+            .arg(intrinsics_camera_matrix_.at<double>(1, 1), 0, 'f', 2));
+
+        if (cap_.isOpened()) {
+            status_label_->setText("Intrinsics loaded. Restart preview to apply the new resolution/rectification.");
+        } else {
+            status_label_->setText("Intrinsics loaded. Start preview to capture at this resolution with rectification applied.");
+        }
+        apply_ui_state();
+    }
+
     void refresh_cameras() {
         camera_combo_->clear();
         const auto candidates = enumerate_video_indices_linux();
@@ -1250,8 +1543,31 @@ private:
             preview_toggle_->blockSignals(false);
             return;
         }
+
+        if (intrinsics_loaded_) {
+            // MJPG is required to unlock the intrinsics' capture resolution on most UVC cameras --
+            // see the same fix applied to IntrinsicsTab::apply_selected_resolution().
+            cap_.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+            cap_.set(cv::CAP_PROP_FRAME_WIDTH, intrinsics_image_size_.width);
+            cap_.set(cv::CAP_PROP_FRAME_HEIGHT, intrinsics_image_size_.height);
+        }
+
         timer_->start();
         set_toggle_button_visual(preview_toggle_, true);
+
+        if (intrinsics_loaded_) {
+            const int actual_w = static_cast<int>(std::lround(cap_.get(cv::CAP_PROP_FRAME_WIDTH)));
+            const int actual_h = static_cast<int>(std::lround(cap_.get(cv::CAP_PROP_FRAME_HEIGHT)));
+            if (actual_w != intrinsics_image_size_.width || actual_h != intrinsics_image_size_.height) {
+                status_label_->setText(QString(
+                    "Warning: camera gave %1x%2 but intrinsics were calibrated at %3x%4. "
+                    "Rectification/homography will be inaccurate -- recalibrate intrinsics at this resolution.")
+                    .arg(actual_w).arg(actual_h)
+                    .arg(intrinsics_image_size_.width).arg(intrinsics_image_size_.height));
+            } else {
+                status_label_->setText(QString("Preview started at %1x%2 (matches intrinsics).").arg(actual_w).arg(actual_h));
+            }
+        }
         apply_ui_state();
     }
 
@@ -1419,6 +1735,10 @@ private:
         if (validation_enabled_ || mode_combo_->currentIndex() != 0 || !cap_.isOpened()) {
             return;
         }
+        if (!intrinsics_loaded_) {
+            status_label_->setText("Load an intrinsics YAML before selecting points -- homography must be solved on the rectified image.");
+            return;
+        }
 
         const QPointF mapped = label_to_frame(pos);
         if (mapped.x() < 0 || mapped.y() < 0) {
@@ -1438,6 +1758,10 @@ private:
     void detect_points() {
         if (!cap_.isOpened() || current_frame_.empty()) {
             status_label_->setText("Start preview before detection.");
+            return;
+        }
+        if (!intrinsics_loaded_) {
+            status_label_->setText("Load an intrinsics YAML before detecting points -- homography must be solved on the rectified image.");
             return;
         }
 
@@ -1504,6 +1828,10 @@ private:
             status_label_->setText("Need exactly 4 image points.");
             return;
         }
+        if (!intrinsics_loaded_) {
+            status_label_->setText("Load an intrinsics YAML before solving -- homography must use rectified points.");
+            return;
+        }
 
         const auto world = world_rect_points();
         if (world.size() != 4) {
@@ -1561,6 +1889,26 @@ private:
               << camera_corner_ground_m[1] << ", "
               << camera_corner_ground_m[2] << ", "
               << camera_corner_ground_m[3] << "]\n";
+
+        // Intrinsics used to rectify the image before this homography was solved -- points were
+        // picked on the undistorted frame, so any consumer must undistort with these same
+        // parameters (at this same resolution) before applying homography_matrix.
+        fs << "intrinsics_source: \"" << intrinsics_path_->text().toStdString() << "\"\n";
+        fs << "camera_matrix:\n";
+        fs << "  rows: 3\n";
+        fs << "  cols: 3\n";
+        fs << "  data: ["
+           << intrinsics_camera_matrix_.at<double>(0, 0) << ", " << intrinsics_camera_matrix_.at<double>(0, 1) << ", " << intrinsics_camera_matrix_.at<double>(0, 2) << ",\n"
+           << "         " << intrinsics_camera_matrix_.at<double>(1, 0) << ", " << intrinsics_camera_matrix_.at<double>(1, 1) << ", " << intrinsics_camera_matrix_.at<double>(1, 2) << ",\n"
+           << "         " << intrinsics_camera_matrix_.at<double>(2, 0) << ", " << intrinsics_camera_matrix_.at<double>(2, 1) << ", " << intrinsics_camera_matrix_.at<double>(2, 2) << "]\n";
+        fs << "distortion_coefficients:\n";
+        fs << "  rows: 1\n";
+        fs << "  cols: " << intrinsics_dist_coeffs_.total() << "\n";
+        fs << "  data: [";
+        for (int i = 0; i < static_cast<int>(intrinsics_dist_coeffs_.total()); ++i) {
+            fs << (i == 0 ? "" : ", ") << intrinsics_dist_coeffs_.at<double>(i, 0);
+        }
+        fs << "]\n";
         fs << "homography_matrix:\n";
         fs << "  rows: 3\n";
         fs << "  cols: 3\n";
@@ -1584,6 +1932,13 @@ private:
         if (!cap_.read(frame) || frame.empty()) {
             status_label_->setText("Frame read failed.");
             return;
+        }
+
+        if (intrinsics_loaded_) {
+            cv::Mat rectified;
+            cv::undistort(frame, rectified, intrinsics_camera_matrix_, intrinsics_dist_coeffs_,
+                intrinsics_projection_matrix_);
+            frame = rectified;
         }
 
         current_frame_ = frame.clone();
@@ -1647,9 +2002,9 @@ private:
         refresh_btn_->setEnabled(!preview_on);
         camera_combo_->setEnabled(!preview_on);
         validation_toggle_->setEnabled(can_validate);
-        detect_btn_->setEnabled(preview_on && !validation_enabled_);
+        detect_btn_->setEnabled(preview_on && intrinsics_loaded_ && !validation_enabled_);
         clear_btn_->setEnabled(!validation_enabled_);
-        solve_btn_->setEnabled(preview_on && image_points_.size() == 4 && !validation_enabled_);
+        solve_btn_->setEnabled(preview_on && intrinsics_loaded_ && image_points_.size() == 4 && !validation_enabled_);
         mode_combo_->setEnabled(!validation_enabled_);
         id_tl_->setEnabled(!validation_enabled_);
         id_tr_->setEnabled(!validation_enabled_);
@@ -1669,6 +2024,8 @@ private:
     QLineEdit* cam_br_m_ = nullptr;
     QLineEdit* cam_bl_m_ = nullptr;
     QLineEdit* save_path_ = nullptr;
+    QLineEdit* intrinsics_path_ = nullptr;
+    QLabel* intrinsics_status_label_ = nullptr;
     QSpinBox* id_tl_ = nullptr;
     QSpinBox* id_tr_ = nullptr;
     QSpinBox* id_br_ = nullptr;
@@ -1687,6 +2044,11 @@ private:
 
     cv::VideoCapture cap_;
     cv::Mat current_frame_;
+    bool intrinsics_loaded_ = false;
+    cv::Size intrinsics_image_size_;
+    cv::Mat intrinsics_camera_matrix_;
+    cv::Mat intrinsics_dist_coeffs_;
+    cv::Mat intrinsics_projection_matrix_;
     std::vector<cv::Point2f> manual_points_;
     std::vector<cv::Point2f> image_points_;
     cv::Mat homography_;
