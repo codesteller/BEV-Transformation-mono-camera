@@ -21,7 +21,7 @@ This folder contains a standalone CMake-based C++ implementation path for the fe
 
 ## OpenCV Resolution
 
-The CMake project prefers OpenCV from `/opt/opencv/4.12.0` by default.
+The CMake project prefers OpenCV from `/opt/opencv/4.12.0` by default. An opencv build script is provided in `cpp/assets/build_opencv.sh`.
 
 - Preferred prefix is controlled by `BEV_OPENCV_PREFIX`.
 - The build checks `${BEV_OPENCV_PREFIX}/lib/pkgconfig` first.
