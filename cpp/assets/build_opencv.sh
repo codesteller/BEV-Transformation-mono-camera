@@ -7,27 +7,27 @@ cd "$cv2_dir"
 
 cv2_install_dir="/opt/opencv/${open_cv_version}"
 
-# # Prep the system
-# sudo apt update && sudo apt upgrade -y
-# sudo apt -y install build-essential checkinstall cmake pkg-config yasm
-# sudo apt -y install git gfortran
-# sudo apt -y install libjpeg8-dev libpng-dev libtiff5-dev
-# sudo apt -y install libavcodec-dev libavformat-dev libswscale-dev libdc1394-dev
-# sudo apt -y install libxine2-dev libv4l-dev
-# sudo apt -y install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
-# sudo apt -y install libgtk2.0-dev libtbb-dev libatlas-base-dev
-# sudo apt -y install libfaac-dev libmp3lame-dev libtheora-dev
-# sudo apt -y install libvorbis-dev libx264-dev libopencore-amrnb-dev libopencore-amrwb-dev  
-# sudo apt -y install x264 v4l-utils
-# sudo apt -y install libprotobuf-dev protobuf-compiler
-# sudo apt -y install libgoogle-glog-dev libgflags-dev
-# sudo apt -y install libgphoto2-dev libeigen3-dev libhdf5-dev doxygen flake8 pylint
-# sudo apt -y install gcc-12 g++-12
+# Prep the system
+sudo apt update && sudo apt upgrade -y
+sudo apt -y install build-essential checkinstall cmake pkg-config yasm
+sudo apt -y install git gfortran
+sudo apt -y install libjpeg8-dev libpng-dev libtiff5-dev
+sudo apt -y install libavcodec-dev libavformat-dev libswscale-dev libdc1394-dev
+sudo apt -y install libxine2-dev libv4l-dev
+sudo apt -y install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+sudo apt -y install libgtk2.0-dev libtbb-dev libatlas-base-dev
+sudo apt -y install libfaac-dev libmp3lame-dev libtheora-dev
+sudo apt -y install libvorbis-dev libx264-dev libopencore-amrnb-dev libopencore-amrwb-dev  
+sudo apt -y install x264 v4l-utils
+sudo apt -y install libprotobuf-dev protobuf-compiler
+sudo apt -y install libgoogle-glog-dev libgflags-dev
+sudo apt -y install libgphoto2-dev libeigen3-dev libhdf5-dev doxygen flake8 pylint
+sudo apt -y install gcc-12 g++-12
 
 
-# # Git clone OpenCV and OpenCV contrib repositories
-# git clone --branch ${open_cv_version} https://github.com/opencv/opencv.git
-# git clone --branch ${open_cv_version} https://github.com/opencv/opencv_contrib.git
+# Git clone OpenCV and OpenCV contrib repositories
+git clone --branch ${open_cv_version} https://github.com/opencv/opencv.git
+git clone --branch ${open_cv_version} https://github.com/opencv/opencv_contrib.git
 
 # Build OpenCV
 cd opencv
