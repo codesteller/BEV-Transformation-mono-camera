@@ -1,6 +1,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -13,6 +14,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMainWindow>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPixmap>
 #include <QPushButton>
@@ -155,6 +157,12 @@ static bool load_intrinsics_yaml(const std::string& path, IntrinsicsData& out, Q
     return true;
 }
 
+// Default home for all calibration assets: ${HOME}/.calibration/openadas/cam<id>/. The cam<id>
+// segment keeps multiple cameras' intrinsics/homography/frames from clobbering each other.
+static QString default_camera_asset_dir(int camera_id) {
+    return QDir::homePath() + "/.calibration/openadas/cam" + QString::number(camera_id);
+}
+
 static QWidget* make_brand_header() {
     auto* header = new QFrame();
     header->setObjectName("brandHeader");
@@ -239,15 +247,23 @@ static void set_toggle_button_visual(QToolButton* button, bool enabled_state) {
 
 class ClickableLabel final : public QLabel {
 public:
-    explicit ClickableLabel(QWidget* parent = nullptr) : QLabel(parent) {}
+    explicit ClickableLabel(QWidget* parent = nullptr) : QLabel(parent) {
+        // StrongFocus + mouse tracking let this label receive key presses (for the zoom-loupe
+        // hotkey) and continuous hover position (for the loupe to follow the cursor) without
+        // requiring a button to be held down.
+        setFocusPolicy(Qt::StrongFocus);
+        setMouseTracking(true);
+    }
 
     std::function<void(const QPoint&)> on_click;
     std::function<void(const QPoint&)> on_press;
     std::function<void(const QPoint&)> on_move;
     std::function<void(const QPoint&)> on_release;
+    std::function<void(QKeyEvent*)> on_key_press;
 
 protected:
     void mousePressEvent(QMouseEvent* event) override {
+        setFocus();
         if (on_press) {
             on_press(event->pos());
         }
@@ -269,6 +285,13 @@ protected:
             on_release(event->pos());
         }
         QLabel::mouseReleaseEvent(event);
+    }
+
+    void keyPressEvent(QKeyEvent* event) override {
+        if (on_key_press) {
+            on_key_press(event);
+        }
+        QLabel::keyPressEvent(event);
     }
 };
 
@@ -338,7 +361,7 @@ public:
 
         square_size_ = new QLineEdit("0.023");
 
-        save_path_ = new QLineEdit("intrinsics.yaml");
+        save_path_ = new QLineEdit(default_camera_asset_dir(0) + "/intrinsics.yaml");
         save_path_->setMinimumWidth(140);
         browse_button_ = new QPushButton("Browse");
         auto* save_row = new QWidget();
@@ -462,6 +485,7 @@ public:
         connect(refresh_resolutions_btn_, &QPushButton::clicked, this, [this]() { refresh_resolutions(); });
         connect(camera_combo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
             refresh_resolutions();
+            update_default_save_path();
         });
         connect(resolution_combo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
             apply_selected_resolution();
@@ -831,6 +855,12 @@ private:
             status_label_->setText(QString("Found %1 camera(s).").arg(camera_combo_->count()));
             refresh_resolutions();
         }
+        update_default_save_path();
+    }
+
+    void update_default_save_path() {
+        const int camera_id = camera_combo_->count() > 0 ? camera_combo_->currentData().toInt() : 0;
+        save_path_->setText(default_camera_asset_dir(camera_id) + "/intrinsics.yaml");
     }
 
     void start_preview() {
@@ -1219,7 +1249,7 @@ public:
         cam_layout->addWidget(camera_combo_, 1);
         cam_layout->addWidget(refresh_btn_);
 
-        intrinsics_path_ = new QLineEdit("intrinsics.yaml");
+        intrinsics_path_ = new QLineEdit(default_camera_asset_dir(0) + "/intrinsics.yaml");
         intrinsics_path_->setMinimumWidth(110);
         auto* browse_intrinsics_btn = new QPushButton("Browse");
         auto* reload_intrinsics_btn = new QPushButton("Reload");
@@ -1237,29 +1267,9 @@ public:
         width_m_ = new QLineEdit("2.0");
         height_m_ = new QLineEdit("2.0");
         ground_m_ = new QLineEdit("1.5");
+        ground_m_->setToolTip("Auto-filled from the solved camera pose after Solve + Save.");
 
-        auto* cam_dist_row = new QWidget();
-        auto* cam_dist_layout = new QGridLayout(cam_dist_row);
-        cam_dist_layout->setContentsMargins(0, 0, 0, 0);
-        cam_dist_layout->setHorizontalSpacing(6);
-        cam_dist_layout->setVerticalSpacing(6);
-        cam_tl_m_ = new QLineEdit("2.8");
-        cam_tr_m_ = new QLineEdit("2.8");
-        cam_br_m_ = new QLineEdit("4.0");
-        cam_bl_m_ = new QLineEdit("4.0");
-        for (auto* edit : {cam_tl_m_, cam_tr_m_, cam_br_m_, cam_bl_m_}) {
-            edit->setMaximumWidth(80);
-        }
-        cam_dist_layout->addWidget(new QLabel("TL"), 0, 0);
-        cam_dist_layout->addWidget(cam_tl_m_, 0, 1);
-        cam_dist_layout->addWidget(new QLabel("TR"), 0, 2);
-        cam_dist_layout->addWidget(cam_tr_m_, 0, 3);
-        cam_dist_layout->addWidget(new QLabel("BR"), 1, 0);
-        cam_dist_layout->addWidget(cam_br_m_, 1, 1);
-        cam_dist_layout->addWidget(new QLabel("BL"), 1, 2);
-        cam_dist_layout->addWidget(cam_bl_m_, 1, 3);
-
-        save_path_ = new QLineEdit("homography.yaml");
+        save_path_ = new QLineEdit(default_camera_asset_dir(0) + "/homography.yaml");
         save_path_->setMinimumWidth(140);
         auto* browse_btn = new QPushButton("Browse");
         auto* save_row = new QWidget();
@@ -1300,7 +1310,6 @@ public:
         left_form->addRow("Plane Width (m)", width_m_);
         left_form->addRow("Plane Height (m)", height_m_);
         left_form->addRow("Camera to Ground (m)", ground_m_);
-        left_form->addRow("Cam->Corner Dist (m, slant)", cam_dist_row);
         left_form->addRow("Aruco IDs (TL/TR/BR/BL)", ids_row);
         left_form->addRow("Save YAML", save_row);
 
@@ -1337,7 +1346,7 @@ public:
         distance_label_ = new QLabel("Distance: n/a");
         intrinsics_status_label_ = new QLabel("Intrinsics: not loaded. Load an intrinsics YAML before detecting points.");
         intrinsics_status_label_->setWordWrap(true);
-        status_label_ = new QLabel("Manual mode: click 4 points in order TL, TR, BR, BL.");
+        status_label_ = new QLabel("Manual mode: click 4 points in order TL, TR, BR, BL. Press Z to zoom in near the cursor for precise placement.");
         status_label_->setWordWrap(true);
 
         auto* left_stack = new QVBoxLayout();
@@ -1379,8 +1388,12 @@ public:
         preview_label_->on_press = [this](const QPoint& pos) { on_preview_press(pos); };
         preview_label_->on_move = [this](const QPoint& pos) { on_preview_move(pos); };
         preview_label_->on_release = [this](const QPoint& pos) { on_preview_release(pos); };
+        preview_label_->on_key_press = [this](QKeyEvent* event) { on_preview_key(event); };
 
         connect(refresh_btn_, &QPushButton::clicked, this, [this]() { refresh_cameras(); });
+        connect(camera_combo_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
+            update_default_paths_and_reload();
+        });
         connect(browse_intrinsics_btn, &QPushButton::clicked, this, [this]() {
             const QString path = QFileDialog::getOpenFileName(
                 this, "Load Intrinsics YAML", intrinsics_path_->text(), "YAML files (*.yaml *.yml)");
@@ -1410,7 +1423,7 @@ public:
         connect(mode_combo_, &QComboBox::currentTextChanged, this, [this]() {
             clear_points();
             status_label_->setText(mode_combo_->currentIndex() == 0
-                ? "Manual mode: click 4 points in order TL, TR, BR, BL."
+                ? "Manual mode: click 4 points in order TL, TR, BR, BL. Press Z to zoom in near the cursor for precise placement."
                 : "Auto mode: click Detect 4 Points to read ArUco IDs and corners.");
         });
         connect(browse_btn, &QPushButton::clicked, this, [this]() {
@@ -1450,79 +1463,57 @@ private:
         };
     }
 
-    bool parse_camera_corner_slant_m(std::array<double, 4>& slant_m, QString& error) const {
-        bool ok_tl = false;
-        bool ok_tr = false;
-        bool ok_br = false;
-        bool ok_bl = false;
-
-        slant_m[0] = cam_tl_m_->text().toDouble(&ok_tl);
-        slant_m[1] = cam_tr_m_->text().toDouble(&ok_tr);
-        slant_m[2] = cam_br_m_->text().toDouble(&ok_br);
-        slant_m[3] = cam_bl_m_->text().toDouble(&ok_bl);
-
-        if (!(ok_tl && ok_tr && ok_br && ok_bl)) {
-            error = "Camera-to-corner distances must be numeric.";
-            return false;
-        }
-        for (double v : slant_m) {
-            if (v <= 0.0) {
-                error = "Camera-to-corner distances must be positive.";
-                return false;
-            }
-        }
-        return true;
-    }
-
-    bool estimate_camera_ground_xy(cv::Point2f& camera_xy, std::array<double, 4>& planar_m, QString& error) const {
+    // Recovers the camera's 3D position in the carpet's own coordinate frame via solvePnP,
+    // using the 4 clicked/detected corners as 2D-3D correspondences against the known plane
+    // rectangle (Plane Width/Height). This needs no manually-measured tape distances -- the
+    // carpet's real-world size, the intrinsics, and the 4 image points are already sufficient.
+    bool estimate_camera_pose_pnp(cv::Point2f& camera_xy, double& camera_height_m, QString& error) const {
         const auto world = world_rect_points();
         if (world.size() != 4) {
             error = "Invalid world plane dimensions.";
             return false;
         }
-
-        std::array<double, 4> slant_m{};
-        if (!parse_camera_corner_slant_m(slant_m, error)) {
+        if (image_points_.size() != 4) {
+            error = "Need exactly 4 image points.";
+            return false;
+        }
+        if (intrinsics_camera_matrix_.empty()) {
+            error = "Intrinsics not loaded.";
             return false;
         }
 
-        bool ok_ground = false;
-        const double ground_h = ground_m_->text().toDouble(&ok_ground);
-        if (!ok_ground || ground_h < 0.0) {
-            error = "Camera to ground must be >= 0.";
+        std::vector<cv::Point3f> object_points;
+        object_points.reserve(4);
+        for (const auto& p : world) {
+            object_points.emplace_back(p.x, p.y, 0.f);
+        }
+
+        // Points were picked on the already-undistorted preview frame (see on_frame_tick's
+        // cv::undistort call), so PnP must use the SAME effective camera matrix that frame was
+        // rectified into (the projection matrix, if the intrinsics provided one) and zero
+        // distortion -- the image has no more lens distortion left to account for.
+        const cv::Mat& camera_matrix =
+            intrinsics_projection_matrix_.empty() ? intrinsics_camera_matrix_ : intrinsics_projection_matrix_;
+        const cv::Mat zero_dist = cv::Mat::zeros(4, 1, CV_64F);
+
+        cv::Mat rvec;
+        cv::Mat tvec;
+        if (!cv::solvePnP(object_points, image_points_, camera_matrix, zero_dist, rvec, tvec, false,
+                cv::SOLVEPNP_ITERATIVE)) {
+            error = "solvePnP failed to converge -- check that the 4 points are in TL, TR, BR, BL order.";
             return false;
         }
 
-        for (size_t i = 0; i < slant_m.size(); ++i) {
-            const double d = slant_m[i];
-            if (d <= ground_h) {
-                error = "Each cam->corner slant distance must be greater than camera-to-ground height.";
-                return false;
-            }
-            planar_m[i] = std::sqrt(std::max(0.0, d * d - ground_h * ground_h));
-        }
+        cv::Mat rotation;
+        cv::Rodrigues(rvec, rotation);
+        const cv::Mat camera_center = -rotation.t() * tvec;  // camera position in world/carpet coordinates
 
-        const cv::Point2f p0 = world[0];
-        const double r0 = planar_m[0];
-        cv::Mat A(3, 2, CV_64F);
-        cv::Mat b(3, 1, CV_64F);
+        camera_xy = cv::Point2f(
+            static_cast<float>(camera_center.at<double>(0, 0)),
+            static_cast<float>(camera_center.at<double>(1, 0)));
+        camera_height_m = std::abs(camera_center.at<double>(2, 0));
 
-        for (int i = 1; i < 4; ++i) {
-            const cv::Point2f pi = world[i];
-            const double ri = planar_m[i];
-            A.at<double>(i - 1, 0) = 2.0 * (pi.x - p0.x);
-            A.at<double>(i - 1, 1) = 2.0 * (pi.y - p0.y);
-            b.at<double>(i - 1, 0) = (r0 * r0 - ri * ri) - (p0.x * p0.x - pi.x * pi.x) - (p0.y * p0.y - pi.y * pi.y);
-        }
-
-        cv::Mat x;
-        if (!cv::solve(A, b, x, cv::DECOMP_SVD)) {
-            error = "Failed to solve camera ground position from distance constraints.";
-            return false;
-        }
-
-        camera_xy = cv::Point2f(static_cast<float>(x.at<double>(0, 0)), static_cast<float>(x.at<double>(1, 0)));
-        return std::isfinite(camera_xy.x) && std::isfinite(camera_xy.y);
+        return std::isfinite(camera_xy.x) && std::isfinite(camera_xy.y) && std::isfinite(camera_height_m);
     }
 
     void load_intrinsics() {
@@ -1568,6 +1559,15 @@ private:
         if (camera_combo_->count() == 0) {
             status_label_->setText("No cameras found.");
         }
+        update_default_paths_and_reload();
+    }
+
+    void update_default_paths_and_reload() {
+        const int camera_id = camera_combo_->count() > 0 ? camera_combo_->currentData().toInt() : 0;
+        const QString dir = default_camera_asset_dir(camera_id);
+        intrinsics_path_->setText(dir + "/intrinsics.yaml");
+        save_path_->setText(dir + "/homography.yaml");
+        load_intrinsics();
     }
 
     void start_preview() {
@@ -1616,6 +1616,7 @@ private:
                 status_label_->setText(QString("Preview started at %1x%2 (matches intrinsics).").arg(actual_w).arg(actual_h));
             }
         }
+        preview_label_->setFocus();
         apply_ui_state();
     }
 
@@ -1742,14 +1743,32 @@ private:
     }
 
     void on_preview_move(const QPoint& pos) {
+        const QPointF p = label_to_frame(pos);
+        if (p.x() >= 0 && p.y() >= 0) {
+            // Tracked unconditionally (not just while dragging a bbox) so the zoom loupe can
+            // follow the cursor on plain hover.
+            last_hover_frame_pos_ = cv::Point2f(static_cast<float>(p.x()), static_cast<float>(p.y()));
+            has_hover_pos_ = true;
+        }
+
         if (!validation_enabled_ || !dragging_bbox_) {
             return;
         }
-        const QPointF p = label_to_frame(pos);
         if (p.x() < 0 || p.y() < 0) {
             return;
         }
         bbox_p1_ = cv::Point2f(static_cast<float>(p.x()), static_cast<float>(p.y()));
+    }
+
+    void on_preview_key(QKeyEvent* event) {
+        if (event->key() != Qt::Key_Z) {
+            return;
+        }
+        zoom_active_ = !zoom_active_;
+        status_label_->setText(zoom_active_
+            ? "Zoom loupe ON: hover near a corner, click inside the magnified inset (top-right) to "
+              "place the point precisely. Press Z to turn off."
+            : "Zoom loupe OFF.");
     }
 
     void on_preview_release(const QPoint& pos) {
@@ -1788,10 +1807,23 @@ private:
             return;
         }
 
-        const QPointF mapped = label_to_frame(pos);
+        QPointF mapped = label_to_frame(pos);
         if (mapped.x() < 0 || mapped.y() < 0) {
             return;
         }
+
+        // If the click landed inside the magnified loupe, re-map it through the loupe's
+        // known crop/zoom instead of using the raw (low-precision) frame coordinate.
+        if (zoom_active_ && zoom_inset_drawn_ &&
+            last_zoom_inset_rect_.contains(
+                cv::Point(static_cast<int>(mapped.x()), static_cast<int>(mapped.y())))) {
+            const double fx = last_zoom_crop_rect_.x
+                + (mapped.x() - last_zoom_inset_rect_.x) / kZoomFactor;
+            const double fy = last_zoom_crop_rect_.y
+                + (mapped.y() - last_zoom_inset_rect_.y) / kZoomFactor;
+            mapped = QPointF(fx, fy);
+        }
+
         if (manual_points_.size() >= 4) {
             return;
         }
@@ -1893,15 +1925,16 @@ private:
             return;
         }
 
-        std::array<double, 4> camera_corner_ground_m{};
+        double camera_height_m = 0.0;
         QString camera_origin_error;
-        if (!estimate_camera_ground_xy(camera_ground_xy_, camera_corner_ground_m, camera_origin_error)) {
+        if (!estimate_camera_pose_pnp(camera_ground_xy_, camera_height_m, camera_origin_error)) {
             camera_origin_valid_ = false;
-            status_label_->setText(QString("Homography solved, but camera ground origin failed: %1").arg(camera_origin_error));
+            status_label_->setText(QString("Homography solved, but camera pose failed: %1").arg(camera_origin_error));
             apply_ui_state();
             return;
         }
         camera_origin_valid_ = true;
+        ground_m_->setText(QString::number(camera_height_m, 'f', 3));
 
         const std::filesystem::path out(save_path_->text().toStdString());
         try {
@@ -1923,20 +1956,11 @@ private:
         fs << "image_width: " << current_frame_.cols << "\n";
         fs << "image_height: " << current_frame_.rows << "\n";
         fs << "mode: " << (mode_combo_->currentIndex() == 0 ? "manual" : "aruco_auto") << "\n";
-        fs << "camera_to_ground_m: " << ground_m_->text().toStdString() << "\n";
+        fs << "camera_pose_method: solvePnP\n";
+        fs << "camera_to_ground_m: " << camera_height_m << "\n";
         fs << "plane_width_m: " << width_m_->text().toStdString() << "\n";
         fs << "plane_height_m: " << height_m_->text().toStdString() << "\n";
-          fs << "camera_ground_xy_m: [" << camera_ground_xy_.x << ", " << camera_ground_xy_.y << "]\n";
-          fs << "camera_to_corner_slant_m: ["
-              << cam_tl_m_->text().toStdString() << ", "
-              << cam_tr_m_->text().toStdString() << ", "
-              << cam_br_m_->text().toStdString() << ", "
-              << cam_bl_m_->text().toStdString() << "]\n";
-          fs << "camera_to_corner_ground_m: ["
-              << camera_corner_ground_m[0] << ", "
-              << camera_corner_ground_m[1] << ", "
-              << camera_corner_ground_m[2] << ", "
-              << camera_corner_ground_m[3] << "]\n";
+        fs << "camera_ground_xy_m: [" << camera_ground_xy_.x << ", " << camera_ground_xy_.y << "]\n";
 
         // Intrinsics used to rectify the image before this homography was solved -- points were
         // picked on the undistorted frame, so any consumer must undistort with these same
@@ -1966,10 +1990,11 @@ private:
            << "         " << homography_.at<double>(2, 0) << ", " << homography_.at<double>(2, 1) << ", " << homography_.at<double>(2, 2) << "]\n";
         fs.close();
 
-        status_label_->setText(QString("Homography saved: %1 | camera ground XY=(%2, %3)")
+        status_label_->setText(QString("Homography saved: %1 | camera pose (solvePnP): XY=(%2, %3), height=%4 m")
             .arg(QString::fromStdString(out.string()))
             .arg(camera_ground_xy_.x, 0, 'f', 2)
-            .arg(camera_ground_xy_.y, 0, 'f', 2));
+            .arg(camera_ground_xy_.y, 0, 'f', 2)
+            .arg(camera_height_m, 0, 'f', 2));
     }
 
     void on_frame_tick() {
@@ -2037,6 +2062,36 @@ private:
             }
         }
 
+        zoom_inset_drawn_ = false;
+        if (zoom_active_ && has_hover_pos_ && !validation_enabled_) {
+            const int crop_half = kZoomCropHalf;
+            const int inset_size = static_cast<int>(std::lround((crop_half * 2) * kZoomFactor));
+            const int margin = 12;
+
+            if (overlay.cols > inset_size + margin * 2 && overlay.rows > inset_size + margin * 2) {
+                const int cx = std::clamp(
+                    static_cast<int>(std::lround(last_hover_frame_pos_.x)), crop_half, overlay.cols - crop_half);
+                const int cy = std::clamp(
+                    static_cast<int>(std::lround(last_hover_frame_pos_.y)), crop_half, overlay.rows - crop_half);
+                const cv::Rect crop_rect(cx - crop_half, cy - crop_half, crop_half * 2, crop_half * 2);
+                const cv::Rect inset_rect(overlay.cols - inset_size - margin, margin, inset_size, inset_size);
+
+                cv::Mat zoomed;
+                cv::resize(overlay(crop_rect), zoomed, inset_rect.size(), 0, 0, cv::INTER_NEAREST);
+                cv::line(zoomed, cv::Point(inset_rect.width / 2, 0), cv::Point(inset_rect.width / 2, inset_rect.height),
+                    cv::Scalar(20, 230, 230), 1);
+                cv::line(zoomed, cv::Point(0, inset_rect.height / 2), cv::Point(inset_rect.width, inset_rect.height / 2),
+                    cv::Scalar(20, 230, 230), 1);
+                zoomed.copyTo(overlay(inset_rect));
+                cv::rectangle(overlay, inset_rect, cv::Scalar(0, 220, 255), 2);
+                cv::rectangle(overlay, crop_rect, cv::Scalar(0, 220, 255), 2);
+
+                last_zoom_crop_rect_ = crop_rect;
+                last_zoom_inset_rect_ = inset_rect;
+                zoom_inset_drawn_ = true;
+            }
+        }
+
         const QImage image = mat_to_qimage(overlay);
         preview_label_->setPixmap(QPixmap::fromImage(image).scaled(
             preview_label_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
@@ -2067,10 +2122,6 @@ private:
     QLineEdit* width_m_ = nullptr;
     QLineEdit* height_m_ = nullptr;
     QLineEdit* ground_m_ = nullptr;
-    QLineEdit* cam_tl_m_ = nullptr;
-    QLineEdit* cam_tr_m_ = nullptr;
-    QLineEdit* cam_br_m_ = nullptr;
-    QLineEdit* cam_bl_m_ = nullptr;
     QLineEdit* save_path_ = nullptr;
     QLineEdit* intrinsics_path_ = nullptr;
     QLabel* intrinsics_status_label_ = nullptr;
@@ -2109,6 +2160,16 @@ private:
     cv::Point2f camera_ground_xy_;
     bool camera_origin_valid_ = false;
     double last_distance_m_ = 0.0;
+
+    // Zoom loupe (toggled with the 'Z' key) for precise corner point placement.
+    static constexpr int kZoomCropHalf = 45;
+    static constexpr double kZoomFactor = 4.0;
+    bool zoom_active_ = false;
+    bool has_hover_pos_ = false;
+    cv::Point2f last_hover_frame_pos_;
+    bool zoom_inset_drawn_ = false;
+    cv::Rect last_zoom_crop_rect_;
+    cv::Rect last_zoom_inset_rect_;
 };
 
 // Keep the platform's native UI font (Segoe UI / San Francisco / the desktop's configured sans
