@@ -6,6 +6,7 @@
 #include <QFormLayout>
 #include <QFrame>
 #include <QFont>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QImage>
@@ -16,6 +17,7 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QToolButton>
+#include <QScrollArea>
 #include <QSlider>
 #include <QSpinBox>
 #include <QTabWidget>
@@ -155,15 +157,16 @@ static bool load_intrinsics_yaml(const std::string& path, IntrinsicsData& out, Q
 
 static QWidget* make_brand_header() {
     auto* header = new QFrame();
+    header->setObjectName("brandHeader");
     auto* layout = new QHBoxLayout(header);
-    layout->setContentsMargins(12, 10, 12, 10);
-    layout->setSpacing(12);
+    layout->setContentsMargins(16, 12, 16, 12);
+    layout->setSpacing(14);
 
     auto* logo_label = new QLabel();
-    logo_label->setFixedSize(72, 72);
+    logo_label->setFixedSize(64, 64);
     logo_label->setAlignment(Qt::AlignCenter);
     logo_label->setStyleSheet(
-        "background:#ffffff; border:1px solid #d4dce7; border-radius:12px; color:#6b7785; font-size:11px;");
+        "background:#ffffff; border:1px solid #3c3c3c; border-radius:10px; color:#6b7785; font-size:11px;");
 
     QPixmap logo(":/assets/pi_logo.png");
     if (logo.isNull()) {
@@ -181,19 +184,20 @@ static QWidget* make_brand_header() {
 
     if (!logo.isNull()) {
         logo_label->setPixmap(
-            logo.scaled(64, 64, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            logo.scaled(56, 56, Qt::KeepAspectRatio, Qt::SmoothTransformation));
     } else {
         logo_label->setText("Logo\nMissing");
     }
 
     auto* title = new QLabel("Gahan AI");
     QFont title_font = title->font();
-    title_font.setPointSize(18);
+    title_font.setPointSize(15);
     title_font.setBold(true);
     title->setFont(title_font);
+    title->setStyleSheet("color:#ffffff;");
 
     auto* subtitle = new QLabel("Monocular Camera Calibration Tool");
-    subtitle->setStyleSheet("color: #5a5a5a;");
+    subtitle->setStyleSheet("color:#9da5b4;");
 
     auto* text_block = new QWidget();
     auto* text_layout = new QVBoxLayout(text_block);
@@ -303,6 +307,10 @@ public:
 
         auto* left_panel = new QGroupBox("Intrinsics Inputs");
         auto* left_form = new QFormLayout(left_panel);
+        left_form->setVerticalSpacing(12);
+        left_form->setHorizontalSpacing(12);
+        left_form->setLabelAlignment(Qt::AlignLeft);
+        left_form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
 
         camera_combo_ = new QComboBox();
         refresh_cameras_btn_ = new QPushButton("Refresh");
@@ -331,6 +339,7 @@ public:
         square_size_ = new QLineEdit("0.023");
 
         save_path_ = new QLineEdit("intrinsics.yaml");
+        save_path_->setMinimumWidth(140);
         browse_button_ = new QPushButton("Browse");
         auto* save_row = new QWidget();
         auto* save_row_layout = new QHBoxLayout(save_row);
@@ -365,6 +374,7 @@ public:
 
         capture_button_ = new QPushButton("Capture Frame");
         calibrate_button_ = new QPushButton("Calibrate + Save");
+        calibrate_button_->setObjectName("primaryButton");
         clear_button_ = new QPushButton("Clear Captures");
 
         auto* row1 = new QWidget();
@@ -386,10 +396,11 @@ public:
         auto_state_label_ = new QLabel();
         auto_state_label_->setTextFormat(Qt::RichText);
         auto_state_label_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-        set_state_label(auto_state_label_, "Auto-capture OFF", "#c62828");
+        set_state_label(auto_state_label_, "Auto-capture OFF", "#f14c4c");
 
-        auto* coverage_panel = new QGroupBox("Coverage (ROS-style)");
+        auto* coverage_panel = new QWidget();
         auto* coverage_form = new QFormLayout(coverage_panel);
+        coverage_form->setContentsMargins(0, 0, 12, 0);
         x_cov_slider_ = create_cov_slider();
         y_cov_slider_ = create_cov_slider();
         size_cov_slider_ = create_cov_slider();
@@ -425,15 +436,23 @@ public:
         auto* left_container = new QWidget();
         left_container->setLayout(left_stack);
 
+        auto* left_scroll = new QScrollArea();
+        left_scroll->setObjectName("sidebarScroll");
+        left_scroll->setWidget(left_container);
+        left_scroll->setWidgetResizable(true);
+        left_scroll->setFrameShape(QFrame::NoFrame);
+        left_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        left_scroll->setMinimumWidth(440);
+
         auto* right_panel = new QGroupBox("View Finder");
         auto* right_layout = new QVBoxLayout(right_panel);
         preview_label_ = new QLabel("Preview stopped.");
         preview_label_->setAlignment(Qt::AlignCenter);
-        preview_label_->setMinimumSize(800, 520);
+        preview_label_->setMinimumSize(640, 400);
         preview_label_->setObjectName("previewArea");
         right_layout->addWidget(preview_label_);
 
-        root_layout->addWidget(left_container, 1);
+        root_layout->addWidget(left_scroll, 1);
         root_layout->addWidget(right_panel, 3);
 
         timer_ = new QTimer(this);
@@ -605,7 +624,7 @@ private:
         }
         auto_capture_enabled_ = true;
         force_auto_capture_once_ = true;
-        set_state_label(auto_state_label_, "Auto-capture ON", "#2e7d32");
+        set_state_label(auto_state_label_, "Auto-capture ON", "#89d185");
         info_banner_->setText("Auto-capture is active. Captured frames will be saved with the calibration output.");
         status_label_->setText("Calibration mode started. Valid detections are auto-captured.");
         set_toggle_button_visual(auto_capture_btn_, true);
@@ -614,7 +633,7 @@ private:
 
     void stop_auto_capture() {
         auto_capture_enabled_ = false;
-        set_state_label(auto_state_label_, "Auto-capture OFF", "#c62828");
+        set_state_label(auto_state_label_, "Auto-capture OFF", "#f14c4c");
         info_banner_->setText("Auto-capture is off. Use Capture Frame for manual captures or toggle Auto Capture to resume.");
         set_toggle_button_visual(auto_capture_btn_, false);
         apply_ui_state();
@@ -1187,6 +1206,10 @@ public:
 
         auto* left_panel = new QGroupBox("Homography Calibration");
         auto* left_form = new QFormLayout(left_panel);
+        left_form->setVerticalSpacing(12);
+        left_form->setHorizontalSpacing(12);
+        left_form->setLabelAlignment(Qt::AlignLeft);
+        left_form->setFieldGrowthPolicy(QFormLayout::ExpandingFieldsGrow);
 
         camera_combo_ = new QComboBox();
         refresh_btn_ = new QPushButton("Refresh");
@@ -1197,6 +1220,7 @@ public:
         cam_layout->addWidget(refresh_btn_);
 
         intrinsics_path_ = new QLineEdit("intrinsics.yaml");
+        intrinsics_path_->setMinimumWidth(110);
         auto* browse_intrinsics_btn = new QPushButton("Browse");
         auto* reload_intrinsics_btn = new QPushButton("Reload");
         auto* intrinsics_row = new QWidget();
@@ -1215,27 +1239,28 @@ public:
         ground_m_ = new QLineEdit("1.5");
 
         auto* cam_dist_row = new QWidget();
-        auto* cam_dist_layout = new QHBoxLayout(cam_dist_row);
+        auto* cam_dist_layout = new QGridLayout(cam_dist_row);
         cam_dist_layout->setContentsMargins(0, 0, 0, 0);
-        cam_dist_layout->setSpacing(6);
+        cam_dist_layout->setHorizontalSpacing(6);
+        cam_dist_layout->setVerticalSpacing(6);
         cam_tl_m_ = new QLineEdit("2.8");
         cam_tr_m_ = new QLineEdit("2.8");
         cam_br_m_ = new QLineEdit("4.0");
         cam_bl_m_ = new QLineEdit("4.0");
-        cam_tl_m_->setMaximumWidth(70);
-        cam_tr_m_->setMaximumWidth(70);
-        cam_br_m_->setMaximumWidth(70);
-        cam_bl_m_->setMaximumWidth(70);
-        cam_dist_layout->addWidget(new QLabel("TL"));
-        cam_dist_layout->addWidget(cam_tl_m_);
-        cam_dist_layout->addWidget(new QLabel("TR"));
-        cam_dist_layout->addWidget(cam_tr_m_);
-        cam_dist_layout->addWidget(new QLabel("BR"));
-        cam_dist_layout->addWidget(cam_br_m_);
-        cam_dist_layout->addWidget(new QLabel("BL"));
-        cam_dist_layout->addWidget(cam_bl_m_);
+        for (auto* edit : {cam_tl_m_, cam_tr_m_, cam_br_m_, cam_bl_m_}) {
+            edit->setMaximumWidth(80);
+        }
+        cam_dist_layout->addWidget(new QLabel("TL"), 0, 0);
+        cam_dist_layout->addWidget(cam_tl_m_, 0, 1);
+        cam_dist_layout->addWidget(new QLabel("TR"), 0, 2);
+        cam_dist_layout->addWidget(cam_tr_m_, 0, 3);
+        cam_dist_layout->addWidget(new QLabel("BR"), 1, 0);
+        cam_dist_layout->addWidget(cam_br_m_, 1, 1);
+        cam_dist_layout->addWidget(new QLabel("BL"), 1, 2);
+        cam_dist_layout->addWidget(cam_bl_m_, 1, 3);
 
         save_path_ = new QLineEdit("homography.yaml");
+        save_path_->setMinimumWidth(140);
         auto* browse_btn = new QPushButton("Browse");
         auto* save_row = new QWidget();
         auto* save_layout = new QHBoxLayout(save_row);
@@ -1244,28 +1269,30 @@ public:
         save_layout->addWidget(browse_btn);
 
         auto* ids_row = new QWidget();
-        auto* ids_layout = new QHBoxLayout(ids_row);
+        auto* ids_layout = new QGridLayout(ids_row);
         ids_layout->setContentsMargins(0, 0, 0, 0);
-        ids_layout->setSpacing(6);
+        ids_layout->setHorizontalSpacing(6);
+        ids_layout->setVerticalSpacing(6);
         id_tl_ = new QSpinBox();
         id_tr_ = new QSpinBox();
         id_br_ = new QSpinBox();
         id_bl_ = new QSpinBox();
         for (auto* box : {id_tl_, id_tr_, id_br_, id_bl_}) {
             box->setRange(0, 1024);
+            box->setMaximumWidth(80);
         }
         id_tl_->setValue(0);
         id_tr_->setValue(1);
         id_br_->setValue(2);
         id_bl_->setValue(3);
-        ids_layout->addWidget(new QLabel("TL"));
-        ids_layout->addWidget(id_tl_);
-        ids_layout->addWidget(new QLabel("TR"));
-        ids_layout->addWidget(id_tr_);
-        ids_layout->addWidget(new QLabel("BR"));
-        ids_layout->addWidget(id_br_);
-        ids_layout->addWidget(new QLabel("BL"));
-        ids_layout->addWidget(id_bl_);
+        ids_layout->addWidget(new QLabel("TL"), 0, 0);
+        ids_layout->addWidget(id_tl_, 0, 1);
+        ids_layout->addWidget(new QLabel("TR"), 0, 2);
+        ids_layout->addWidget(id_tr_, 0, 3);
+        ids_layout->addWidget(new QLabel("BR"), 1, 0);
+        ids_layout->addWidget(id_br_, 1, 1);
+        ids_layout->addWidget(new QLabel("BL"), 1, 2);
+        ids_layout->addWidget(id_bl_, 1, 3);
 
         left_form->addRow("Camera", cam_row);
         left_form->addRow("Intrinsics YAML", intrinsics_row);
@@ -1284,14 +1311,27 @@ public:
         detect_btn_ = new QPushButton("Detect 4 Points");
         clear_btn_ = new QPushButton("Clear Points");
         solve_btn_ = new QPushButton("Solve + Save");
+        solve_btn_->setObjectName("primaryButton");
 
         auto* controls = new QGroupBox("Actions");
-        auto* controls_layout = new QHBoxLayout(controls);
-        controls_layout->addWidget(preview_toggle_);
-        controls_layout->addWidget(validation_toggle_);
-        controls_layout->addWidget(detect_btn_);
-        controls_layout->addWidget(clear_btn_);
-        controls_layout->addWidget(solve_btn_);
+        auto* controls_layout = new QVBoxLayout(controls);
+        controls_layout->setSpacing(10);
+
+        auto* toggle_row = new QWidget();
+        auto* toggle_row_layout = new QHBoxLayout(toggle_row);
+        toggle_row_layout->setContentsMargins(0, 0, 0, 0);
+        toggle_row_layout->addWidget(preview_toggle_);
+        toggle_row_layout->addWidget(validation_toggle_);
+
+        auto* action_row = new QWidget();
+        auto* action_row_layout = new QHBoxLayout(action_row);
+        action_row_layout->setContentsMargins(0, 0, 0, 0);
+        action_row_layout->addWidget(detect_btn_);
+        action_row_layout->addWidget(clear_btn_);
+        action_row_layout->addWidget(solve_btn_);
+
+        controls_layout->addWidget(toggle_row);
+        controls_layout->addWidget(action_row);
 
         points_label_ = new QLabel("Selected points: 0/4");
         distance_label_ = new QLabel("Distance: n/a");
@@ -1312,16 +1352,24 @@ public:
         auto* left_container = new QWidget();
         left_container->setLayout(left_stack);
 
+        auto* left_scroll = new QScrollArea();
+        left_scroll->setObjectName("sidebarScroll");
+        left_scroll->setWidget(left_container);
+        left_scroll->setWidgetResizable(true);
+        left_scroll->setFrameShape(QFrame::NoFrame);
+        left_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        left_scroll->setMinimumWidth(440);
+
         auto* right_panel = new QGroupBox("View Finder");
         auto* right_layout = new QVBoxLayout(right_panel);
         preview_label_ = new ClickableLabel();
         preview_label_->setObjectName("previewArea");
         preview_label_->setAlignment(Qt::AlignCenter);
-        preview_label_->setMinimumSize(800, 520);
+        preview_label_->setMinimumSize(640, 400);
         preview_label_->setText("Preview stopped.");
         right_layout->addWidget(preview_label_);
 
-        root_layout->addWidget(left_container, 1);
+        root_layout->addWidget(left_scroll, 1);
         root_layout->addWidget(right_panel, 3);
 
         timer_ = new QTimer(this);
@@ -2063,96 +2111,199 @@ private:
     double last_distance_m_ = 0.0;
 };
 
+// Keep the platform's native UI font (Segoe UI / San Francisco / the desktop's configured sans
+// on Linux) rather than naming a family explicitly: on this Qt/fontconfig combination, swapping
+// in an explicitly-named family (even one confirmed installed) corrupts QFormLayout's row-height
+// computation and makes rows overlap. A size bump on the existing font is safe and sufficient.
+static void apply_professional_font(QApplication& app) {
+    QFont font = app.font();
+    font.setPointSize(10);
+    app.setFont(font);
+}
+
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
+    apply_professional_font(app);
 
+    // VS Code Dark+ palette.
     app.setStyleSheet(R"(
         QWidget#intrinsicsTabRoot {
-            background: #eef2f8;
+            background: #1e1e1e;
         }
         QMainWindow {
-            background: #eef2f8;
+            background: #1e1e1e;
+        }
+        QFrame#brandHeader {
+            background: #252526;
+            border-bottom: 1px solid #3c3c3c;
+        }
+        QTabWidget::pane {
+            border: 1px solid #3c3c3c;
+            background: #1e1e1e;
+            top: -1px;
+        }
+        QTabBar::tab {
+            background: #2d2d2d;
+            color: #969696;
+            padding: 9px 20px;
+            border: 1px solid transparent;
+            border-bottom: none;
+            margin-right: 2px;
+        }
+        QTabBar::tab:selected {
+            background: #1e1e1e;
+            color: #ffffff;
+            border-top: 2px solid #007acc;
+        }
+        QTabBar::tab:hover:!selected {
+            background: #2a2d2e;
+            color: #cccccc;
         }
         QGroupBox {
-            background: #ffffff;
-            border: 1px solid #d8e0eb;
-            border-radius: 14px;
-            margin-top: 18px;
+            background: #252526;
+            border: 1px solid #3c3c3c;
+            border-radius: 6px;
+            margin-top: 16px;
             padding-top: 10px;
             font-weight: 600;
         }
         QGroupBox::title {
             subcontrol-origin: margin;
-            left: 12px;
+            left: 10px;
             padding: 0 6px;
-            color: #19324a;
+            color: #cccccc;
         }
         QLabel {
-            color: #163049;
+            color: #cccccc;
         }
         QLabel#infoBanner {
-            background: #f7f9fc;
-            border: 1px solid #d8e0eb;
-            border-radius: 12px;
+            background: #2d2d2d;
+            border: 1px solid #3c3c3c;
+            border-radius: 6px;
             padding: 10px 12px;
-            color: #26415c;
+            color: #9da5b4;
         }
         QLabel#previewArea {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #102030, stop:1 #1d2f45);
-            border: 1px solid #20354d;
-            border-radius: 14px;
-            color: #d9e6f2;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #141414, stop:1 #1c1c1c);
+            border: 1px solid #3c3c3c;
+            border-radius: 6px;
+            color: #d4d4d4;
         }
         QLineEdit, QComboBox, QSpinBox {
-            background: #ffffff;
-            border: 1px solid #c8d4e1;
-            border-radius: 10px;
+            background: #3c3c3c;
+            border: 1px solid #3c3c3c;
+            border-radius: 4px;
             padding: 8px 10px;
             min-height: 26px;
+            color: #cccccc;
+            selection-background-color: #264f78;
+        }
+        QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
+            border: 1px solid #007acc;
         }
         QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled {
-            background: #eef2f8;
-            color: #8693a5;
+            background: #2d2d2d;
+            color: #6b6b6b;
+        }
+        QComboBox::drop-down {
+            border: none;
+            width: 22px;
+        }
+        QComboBox QAbstractItemView {
+            background: #3c3c3c;
+            color: #cccccc;
+            selection-background-color: #094771;
+            border: 1px solid #454545;
         }
         QPushButton, QToolButton {
-            background: #ffffff;
-            border: 1px solid #bfcddb;
-            border-radius: 10px;
-            padding: 8px 12px;
+            background: #3c3c3c;
+            border: 1px solid #3c3c3c;
+            border-radius: 4px;
+            padding: 8px 14px;
             min-height: 34px;
-            color: #163049;
+            color: #cccccc;
         }
         QPushButton:hover, QToolButton:hover {
-            background: #f5f8fb;
+            background: #45494e;
+        }
+        QPushButton:pressed, QToolButton:pressed {
+            background: #4d5257;
         }
         QPushButton:disabled, QToolButton:disabled {
-            background: #edf1f5;
-            color: #a0a9b6;
-            border-color: #d8e0eb;
+            background: #2d2d2d;
+            color: #656565;
+            border-color: #2d2d2d;
+        }
+        QPushButton#primaryButton {
+            background: #0e639c;
+            border: 1px solid #0e639c;
+            color: #ffffff;
+            font-weight: 600;
+        }
+        QPushButton#primaryButton:hover {
+            background: #1177bb;
+        }
+        QPushButton#primaryButton:pressed {
+            background: #0d5789;
+        }
+        QPushButton#primaryButton:disabled {
+            background: #2d2d2d;
+            border-color: #2d2d2d;
+            color: #656565;
         }
         QToolButton[toggleState="on"] {
-            background: #e8f5e9;
-            border-color: #9ccc65;
-            color: #1b5e20;
+            background: #143d2b;
+            border-color: #2ea043;
+            color: #89d185;
             font-weight: 700;
         }
         QToolButton[toggleState="off"] {
-            background: #ffebee;
-            border-color: #ef9a9a;
-            color: #b71c1c;
+            background: #3a1d1d;
+            border-color: #f14c4c;
+            color: #f14c4c;
             font-weight: 700;
         }
         QSlider::groove:horizontal {
-            border: 1px solid #d5deea;
-            height: 8px;
-            background: #edf2f7;
-            border-radius: 4px;
+            border: 1px solid #3c3c3c;
+            height: 6px;
+            background: #3c3c3c;
+            border-radius: 3px;
         }
         QSlider::handle:horizontal {
-            background: #2c7be5;
-            width: 18px;
+            background: #0e639c;
+            width: 16px;
             margin: -6px 0;
-            border-radius: 9px;
+            border-radius: 8px;
+        }
+        QSlider::handle:horizontal:hover {
+            background: #1177bb;
+        }
+        QScrollArea#sidebarScroll {
+            background: transparent;
+            border: none;
+        }
+        QScrollArea#sidebarScroll > QWidget > QWidget {
+            background: transparent;
+        }
+        QScrollBar:vertical {
+            background: transparent;
+            width: 12px;
+            margin: 0;
+        }
+        QScrollBar::handle:vertical {
+            background: #4a4a4a;
+            min-height: 24px;
+            border-radius: 5px;
+            margin: 2px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background: #5a5a5a;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0;
+        }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+            background: transparent;
         }
     )");
 
@@ -2165,12 +2316,13 @@ int main(int argc, char** argv) {
 
     auto* central = new QWidget();
     auto* root_layout = new QVBoxLayout(central);
-    root_layout->setContentsMargins(6, 6, 6, 6);
-    root_layout->setSpacing(6);
+    root_layout->setContentsMargins(0, 0, 0, 0);
+    root_layout->setSpacing(10);
     root_layout->addWidget(make_brand_header());
     root_layout->addWidget(tabs, 1);
 
     window.setCentralWidget(central);
+    window.setMinimumSize(1200, 700);
     window.resize(1280, 760);
     window.show();
 
