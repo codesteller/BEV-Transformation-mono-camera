@@ -5,8 +5,8 @@
  # @ Description: Enter description here
  """
 
-import camera.camera_calibration as camera_calibration
-import camera.camera_rectification as camera_rectification
+import python.camera.camera_calibration as camera_calibration
+import python.camera.camera_rectification as camera_rectification
 import cv2
 import numpy as np
 import math
