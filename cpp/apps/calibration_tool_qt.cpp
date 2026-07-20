@@ -35,6 +35,8 @@
 #include <opencv2/videoio/registry.hpp>
 #include <opencv2/videoio.hpp>
 
+#include "bev/calibration_io.hpp"
+
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -59,108 +61,23 @@ static QImage mat_to_qimage(const cv::Mat& mat) {
         .copy();
 }
 
-struct IntrinsicsData {
-    int image_width = 0;
-    int image_height = 0;
-    cv::Mat camera_matrix;      // 3x3 CV_64F (K)
-    cv::Mat dist_coeffs;        // Nx1 CV_64F (D)
-    cv::Mat projection_matrix;  // 3x3 CV_64F, optional (top-left of ROS-style 3x4 P)
-};
+using IntrinsicsData = bev::IntrinsicsData;
 
-// Reads the "key:\n  ...\n  data: [v0, v1, ...]" block written by
-// IntrinsicsTab::calibrate_and_save(). Not a general YAML parser -- tailored to that exact
-// hand-written schema, searching from block_pos for the next "data: [ ... ]" list.
-static std::vector<double> extract_yaml_data_list(const std::string& text, size_t block_pos) {
-    std::vector<double> values;
-    if (block_pos == std::string::npos) {
-        return values;
-    }
-    const size_t data_pos = text.find("data:", block_pos);
-    if (data_pos == std::string::npos) {
-        return values;
-    }
-    const size_t open = text.find('[', data_pos);
-    const size_t close = (open == std::string::npos) ? std::string::npos : text.find(']', open);
-    if (open == std::string::npos || close == std::string::npos) {
-        return values;
-    }
-    std::stringstream ss(text.substr(open + 1, close - open - 1));
-    std::string token;
-    while (std::getline(ss, token, ',')) {
-        try {
-            values.push_back(std::stod(token));
-        } catch (const std::exception&) {
-        }
-    }
-    return values;
-}
-
+// Thin QString-flavored wrapper around bev::load_intrinsics_yaml (shared with bev_runner) so
+// the GUI's status labels can keep using QString without duplicating the parser.
 static bool load_intrinsics_yaml(const std::string& path, IntrinsicsData& out, QString& error) {
-    std::ifstream fs(path);
-    if (!fs.is_open()) {
-        error = "Could not open file.";
-        return false;
+    std::string std_error;
+    const bool ok = bev::load_intrinsics_yaml(path, out, std_error);
+    if (!ok) {
+        error = QString::fromStdString(std_error);
     }
-    std::ostringstream buffer;
-    buffer << fs.rdbuf();
-    const std::string text = buffer.str();
-
-    auto parse_int_after = [&](const std::string& key) -> int {
-        const size_t pos = text.find(key);
-        if (pos == std::string::npos) {
-            return -1;
-        }
-        try {
-            return std::stoi(text.substr(pos + key.size()));
-        } catch (const std::exception&) {
-            return -1;
-        }
-    };
-
-    out.image_width = parse_int_after("image_width:");
-    out.image_height = parse_int_after("image_height:");
-    if (out.image_width <= 0 || out.image_height <= 0) {
-        error = "Missing or invalid image_width/image_height.";
-        return false;
-    }
-
-    const auto k_values = extract_yaml_data_list(text, text.find("camera_matrix:"));
-    if (k_values.size() != 9) {
-        error = "camera_matrix must have 9 values.";
-        return false;
-    }
-    out.camera_matrix = cv::Mat(3, 3, CV_64F);
-    for (int i = 0; i < 9; ++i) {
-        out.camera_matrix.at<double>(i / 3, i % 3) = k_values[static_cast<size_t>(i)];
-    }
-
-    const auto d_values = extract_yaml_data_list(text, text.find("distortion_coefficients:"));
-    if (d_values.empty()) {
-        error = "distortion_coefficients missing.";
-        return false;
-    }
-    out.dist_coeffs = cv::Mat(static_cast<int>(d_values.size()), 1, CV_64F);
-    for (size_t i = 0; i < d_values.size(); ++i) {
-        out.dist_coeffs.at<double>(static_cast<int>(i), 0) = d_values[i];
-    }
-
-    const auto p_values = extract_yaml_data_list(text, text.find("projection_matrix:"));
-    if (p_values.size() == 12) {
-        out.projection_matrix = cv::Mat(3, 3, CV_64F);
-        for (int r = 0; r < 3; ++r) {
-            for (int c = 0; c < 3; ++c) {
-                out.projection_matrix.at<double>(r, c) = p_values[static_cast<size_t>(r * 4 + c)];
-            }
-        }
-    }
-
-    return true;
+    return ok;
 }
 
 // Default home for all calibration assets: ${HOME}/.calibration/openadas/cam<id>/. The cam<id>
 // segment keeps multiple cameras' intrinsics/homography/frames from clobbering each other.
 static QString default_camera_asset_dir(int camera_id) {
-    return QDir::homePath() + "/.calibration/openadas/cam" + QString::number(camera_id);
+    return QString::fromStdString(bev::default_camera_asset_dir(camera_id));
 }
 
 static QWidget* make_brand_header() {
