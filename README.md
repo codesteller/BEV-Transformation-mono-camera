@@ -17,6 +17,12 @@ Active development is in [`cpp/`](cpp/) — a Qt5 + OpenCV desktop calibration t
     - [x] Save the homography, recovered camera pose, and the intrinsics it was solved against to a single YAML file.
     - [x] `bev_runner` loads the saved intrinsics + homography YAML, undistorts live frames, and warps them to a top-down BEV view with the saved homography (plus a scale grid and camera-position marker for reference).
     - [x] Use the BEV transformation for depth estimation and object detection — the Homography tab's drag-a-bounding-box validation mode maps any point to ground-plane distance from the camera.
+- [x] Depth estimation and object detection 
+    - [x] Depth estimation using homography-based BEV transformation and YoloV8 model for object detection.
+    - [x] Drag-a-bounding-box validation mode maps any point to ground-plane distance from the camera.
+- [ ] Camera-Radar Calibration Tool
+    - [ ] Use a corner reflector & checkerboard to calibrate radar to camera, and save the extrinsics to a YAML file for later use in sensor fusion.
+    - [ ] Use the saved radar-camera extrinsics to project radar points into the camera image and BEV view for sensor fusion.
 
 ## Dependencies
 - OpenCV 4.10.0 or higher
