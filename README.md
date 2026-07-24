@@ -20,8 +20,8 @@ Active development is in [`cpp/`](cpp/) — a Qt5 + OpenCV desktop calibration t
 - [x] Depth estimation and object detection 
     - [x] Depth estimation using homography-based BEV transformation and YoloV8 model for object detection.
     - [x] Drag-a-bounding-box validation mode maps any point to ground-plane distance from the camera.
-- [ ] Camera-Radar Calibration Tool
-    - [ ] Use a corner reflector & checkerboard to calibrate radar to camera, and save the extrinsics to a YAML file for later use in sensor fusion.
+- [x] Camera-Radar Calibration Tool
+    - [x] Use a corner reflector & checkerboard to calibrate a 4D radar to the camera (6-DOF, closed-form Kabsch + RANSAC + Ceres nonlinear refinement), and save the extrinsics to a YAML file for later use in sensor fusion. See [cpp/README.md](cpp/README.md#radar-camera-tab) for details.
     - [ ] Use the saved radar-camera extrinsics to project radar points into the camera image and BEV view for sensor fusion.
 
 ## Dependencies
@@ -30,3 +30,4 @@ Active development is in [`cpp/`](cpp/) — a Qt5 + OpenCV desktop calibration t
 - Qt5
 - C++17
 - CUDA Toolkit / cuDNN (optional today; for future GPU-accelerated depth estimation and object detection)
+- yaml-cpp, Ceres Solver, Linux SocketCAN — for the Radar-Camera tab; see [cpp/README.md](cpp/README.md#dependency-contract)

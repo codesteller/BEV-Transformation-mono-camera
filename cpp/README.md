@@ -6,7 +6,7 @@ raw feed to a saved intrinsics + ground-plane homography, ready for a downstream
 
 ## Executables
 
-- **`calibration_tool_qt`** — the actively developed tool. A single window with two tabs:
+- **`calibration_tool_qt`** — the actively developed tool. A single window with three tabs:
   - **Intrinsics**: camera + resolution selection (probes actual supported modes over MJPG so
     cameras aren't silently capped at a low default resolution), live preview with chessboard
     detection and ROS-style X/Y/Size/Skew coverage tracking, capture, and
@@ -19,6 +19,7 @@ raw feed to a saved intrinsics + ground-plane homography, ready for a downstream
     (press `Z` on the preview, click inside the magnified inset) helps place corner points
     precisely. A drag-a-bounding-box validation mode reports estimated distance-to-camera for
     sanity-checking against a tape measurement.
+  - **Radar-Camera**: see [Radar-Camera Tab](#radar-camera-tab) below.
 - **`bev_runner`** — loads a saved intrinsics + homography YAML pair, opens the camera at the
   intrinsics' resolution, and per frame: undistorts, then warps straight to a top-down BEV
   canvas by composing the saved homography with a meters-to-pixels transform. The view window
@@ -43,9 +44,73 @@ overwriting each other, and the path updates live as you switch the Camera dropd
 ${HOME}/.calibration/openadas/cam<id>/intrinsics.yaml
 ${HOME}/.calibration/openadas/cam<id>/intrinsics_images/   # saved calibration frames
 ${HOME}/.calibration/openadas/cam<id>/homography.yaml
+${HOME}/.calibration/openadas/cam<id>/radar_cam_config.yaml
+${HOME}/.calibration/openadas/cam<id>/radar_cam_captures/  # capture_0001/, capture_0002/, ...
+${HOME}/.calibration/openadas/cam<id>/radar_extrinsics.yaml
 ```
 
 Every path field has a Browse button if you want a different location instead.
+
+## Radar-Camera Tab
+
+Solves the 6-DOF rigid transform between a 4D radar and the camera using a trihedral corner
+reflector rigidly bolted to a checkerboard, observed across 30-50 static captures at varied
+range/azimuth/height. Implements the full pipeline from `radcam_calibplan.md` at the repo root:
+closed-form Kabsch/Umeyama with mandatory determinant correction, RANSAC (exhaustive triple
+enumeration at this capture-count scale, not random sampling), iterative gate tightening with an
+inlier-drop guardrail, Ceres nonlinear refinement (Mode A: refine `(R,t)`; Mode B: jointly
+estimate the reflector offset `X_B` too, since a bad caliper measurement of `X_B` is the one
+systematic error the residuals otherwise can't detect), and two independent validation axes
+(held-out residuals, and a ground-plane cross-check via the Homography tab's own saved YAML).
+
+- **Config** (`radar_cam_config.yaml`): every threshold from the spec — gate radii per iteration,
+  Doppler/RCS/persistence/spread thresholds, RANSAC and gate-iteration parameters, refinement
+  mode, validation thresholds. Loaded via yaml-cpp; missing keys keep sensible defaults.
+- **Capture** (`radar_cam_captures/capture_NNNN/`): `image.png` (rectified camera frame),
+  `radar_dwell.npy` (a real, `numpy.load()`-compatible `(F, Dmax, 7)` float64 array — every raw
+  per-frame detection, not just the aggregated result, per the spec's "log everything raw"
+  requirement), optional `radar_bg.npy`, and `meta.yaml`.
+  - Capture requires Camera Preview and Radar Live both running; it accumulates ~25 radar dwells
+    (gated on the radar's own dwell `frame_id`, not raw CAN traffic) plus the current camera
+    frame, runs board detection + PnP, and writes the directory if the capture passes the
+    quality gates (full board detection, PnP reprojection RMS, board tilt).
+- **Inspect** runs the pre-solve capture-distribution diagnostic (§9.3): warns if the reflector
+  position cloud is too close to coplanar to constrain all 6 DOF, and reports range/azimuth/height
+  spread (height is flagged specifically — it's the one operators forget to vary).
+- **Solve** runs the full pipeline and writes `radar_extrinsics.yaml` (R, t, Euler angles, inlier
+  count, RMS residuals, `X_B` estimated-vs-measured drift, per-stage clutter-filter funnel counts).
+- **Validate** reports held-out 3D/pixel residual statistics, and — if a Homography-tab YAML is
+  loaded — the ground-plane cross-check (derived radar mounting height/pitch/roll, compared
+  against the tape-measure/inclinometer values in the config). This is a read-only diagnostic:
+  it never feeds back into the solve.
+
+### Testing without radar hardware
+
+The live CAN-FD reader can be exercised against a virtual CAN interface (`vcan0`), no radar
+required — see the [Tests](#tests) section below for the one-time setup.
+
+## Tests
+
+Catch2-based unit tests for the Radar-Camera tab's algorithmic core
+(`include/bev/radarcam/*.hpp`) live in `cpp/tests/`, and build/run independently of Qt:
+
+```bash
+cd cpp
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+One test (`SocketCanReader decodes a live dwell over a real AF_CAN socket`) needs a virtual CAN
+interface and otherwise skips itself with setup instructions in its own failure message:
+
+```bash
+sudo modprobe vcan
+sudo ip link add dev vcan0 type vcan
+sudo ip link set up vcan0
+```
+
+Diagnostic-plot renderers write preview PNGs (for manual visual review, since rendering isn't
+numerically testable) to `${HOME}/.cache/openadas_radarcam_previews/`.
 
 ## Dependency Contract
 
@@ -55,6 +120,11 @@ Every path field has a Browse button if you want a different location instead.
 - C++17
 - CUDA Toolkit (enabled by default)
 - cuDNN (enabled by default)
+- yaml-cpp — Radar-Camera tab's config/output YAML (`apt install libyaml-cpp-dev`)
+- Ceres Solver — Radar-Camera tab's nonlinear refinement (`apt install libceres-dev`; pulls in
+  Eigen, SuiteSparse, glog, gflags)
+- Catch2 3 — unit test suite (`apt install catch2`), only needed if `BUILD_TESTS=ON` (default)
+- Linux SocketCAN (kernel headers only, no extra package) — Radar-Camera tab's live CAN-FD reader
 
 ## OpenCV Resolution
 
@@ -129,3 +199,9 @@ just calibrated for camera 0.
    estimated distance against a tape measurement.
 4. Run `./build/bev_runner` (or `bev_runner <camera_index>` for a different camera) to see the
    live undistorted feed and its BEV warp side by side, using the same two YAML files.
+5. **Radar-Camera tab** (needs a 4D radar on CAN-FD): fill in a `radar_cam_config.yaml` (board
+   geometry, reflector offset `X_B`, coarse extrinsic, clutter/solver thresholds — see
+   [Radar-Camera Tab](#radar-camera-tab)), start Camera Preview and Radar Live, then Capture the
+   rig at 30-50 combinations of range (~5-40m), azimuth (full radar FOV), and height (>=3 distinct
+   levels — the one operators forget). Run Inspect to sanity-check the capture spread before
+   solving, then Solve, then Validate.

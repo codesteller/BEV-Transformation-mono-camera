@@ -1,0 +1,33 @@
+board:
+  inner_corners_x: 8
+  inner_corners_y: 6
+  square_size_m: 0.035
+
+x_b_measured_m: [0.0, 0.0, 0.12]
+
+coarse_euler_deg: [0.0, -5.0, 90.0]
+coarse_translation_m: [0.3, 0.1, -0.2]
+
+pnp_reproj_rms_max_px: 1.0
+board_min_tilt_deg: 15.0
+
+doppler_threshold_mps: 0.5
+sigma_trihedral_dbsm: 22.5
+r_ref_m: 1.0
+rcs_margin_db: 10.0
+background_match_radius_m: 0.3
+radar_height_above_ground_m: 0.5
+persistence_frac: 0.8
+spread_max_m: 0.10
+
+gate_radii_m: [2.0, 0.5, 0.4]
+ransac_inlier_threshold_m: 0.25
+max_gate_iterations: 3
+inlier_drop_warn_frac: 0.5
+
+refine_mode: "B"
+run_mode_b_diagnostic: true
+huber_delta_m: 0.1
+
+holdout_fraction: 0.2
+svd_ratio_warn_threshold: 0.15

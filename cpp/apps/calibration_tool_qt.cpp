@@ -237,6 +237,8 @@ static std::vector<int> enumerate_video_indices_linux() {
     return indices;
 }
 
+#include "radar_cam_tab.hpp"
+
 class IntrinsicsTab final : public QWidget {
 public:
     explicit IntrinsicsTab(QWidget* parent = nullptr) : QWidget(parent) {
@@ -2291,6 +2293,7 @@ int main(int argc, char** argv) {
     auto* tabs = new QTabWidget();
     tabs->addTab(new IntrinsicsTab(), "Intrinsics");
     tabs->addTab(new HomographyTab(), "Homography");
+    tabs->addTab(new RadarCamTab(), "Radar-Camera");
 
     auto* central = new QWidget();
     auto* root_layout = new QVBoxLayout(central);
