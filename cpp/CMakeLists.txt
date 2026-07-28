@@ -35,6 +35,10 @@ endif()
 
 find_package(Qt5 REQUIRED COMPONENTS Widgets)
 find_package(yaml-cpp REQUIRED)
+if(NOT TARGET yaml-cpp::yaml-cpp AND TARGET yaml-cpp)
+    # yaml-cpp < 0.8 exports the unnamespaced "yaml-cpp" target only.
+    add_library(yaml-cpp::yaml-cpp ALIAS yaml-cpp)
+endif()
 find_package(Ceres REQUIRED)
 
 if(ENABLE_CUDA)

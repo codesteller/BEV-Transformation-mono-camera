@@ -2,6 +2,10 @@
 */build
 .vscode
 
+# Python
+__pycache__/
+*.pyc
+
 # Images
 *.jpg
 *.jpeg

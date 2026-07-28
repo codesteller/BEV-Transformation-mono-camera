@@ -150,6 +150,8 @@ public:
         camera_preview_toggle_->setMinimumHeight(34);
         radar_live_toggle_ = make_toggle_button("Radar Live");
         radar_live_toggle_->setMinimumHeight(34);
+        live_overlay_toggle_ = make_toggle_button("Live Overlay");
+        live_overlay_toggle_->setMinimumHeight(34);
         capture_btn_ = new QPushButton("Capture");
         inspect_btn_ = new QPushButton("Run Inspect (§9.3)");
         solve_btn_ = new QPushButton("Run Solve");
@@ -164,6 +166,7 @@ public:
         toggle_row_layout->setContentsMargins(0, 0, 0, 0);
         toggle_row_layout->addWidget(camera_preview_toggle_);
         toggle_row_layout->addWidget(radar_live_toggle_);
+        toggle_row_layout->addWidget(live_overlay_toggle_);
         auto* action_row = new QWidget();
         auto* action_row_layout = new QHBoxLayout(action_row);
         action_row_layout->setContentsMargins(0, 0, 0, 0);
@@ -272,6 +275,13 @@ public:
                 start_radar_live();
             } else {
                 stop_radar_live();
+            }
+        });
+        connect(live_overlay_toggle_, &QToolButton::toggled, this, [this](bool checked) {
+            if (checked) {
+                start_live_overlay();
+            } else {
+                stop_live_overlay();
             }
         });
         connect(capture_btn_, &QPushButton::clicked, this, [this]() { begin_capture(); });
@@ -397,6 +407,14 @@ private:
             camera_preview_toggle_->blockSignals(false);
             return;
         }
+        if (intrinsics_loaded_) {
+            // MJPG is required to unlock the intrinsics' capture resolution on most UVC cameras --
+            // see the same fix in HomographyTab/IntrinsicsTab's preview start. Without this, V4L2
+            // silently falls back to its low default resolution (often 640x480).
+            cap_.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+            cap_.set(cv::CAP_PROP_FRAME_WIDTH, intrinsics_image_size_.width);
+            cap_.set(cv::CAP_PROP_FRAME_HEIGHT, intrinsics_image_size_.height);
+        }
         if (!timer_->isActive()) timer_->start();
         set_toggle_button_visual(camera_preview_toggle_, true);
         apply_ui_state();
@@ -470,6 +488,33 @@ private:
                 if (!image.isNull()) {
                     preview_label_->setPixmap(
                         QPixmap::fromImage(image).scaled(preview_label_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                }
+
+                // Live radar-point overlay (bottom diagnostics pane): project every raw detection in
+                // the current dwell snapshot into this frame with the extrinsic loaded by the "Live
+                // Overlay" button (see start_live_overlay()), so alignment against a saved calibration
+                // is visible in real time without running Solve in this session.
+                //
+                // Throttled to every 3rd tick (~10Hz) and downscaled BEFORE the BGR->RGB convert/copy/
+                // Qt-scale in show_diagnostic_image -- doing that full pipeline at full camera
+                // resolution on every 33ms tick (stacked on top of this block's own
+                // findChessboardCorners call) is what made the overlay lag.
+                if (live_overlay_enabled_ && radar_reader_.is_running() && (++live_overlay_tick_counter_ % 3 == 0)) {
+                    cv::Mat radar_overlay = rectified.clone();
+                    const cv::Matx33d K = effective_camera_matrix();
+                    const auto radar_snap = radar_reader_.snapshot();
+                    for (const auto& d : radar_snap.detections) {
+                        const cv::Vec3d qv(d.position.x, d.position.y, d.position.z);
+                        const cv::Vec3d p_cam = live_overlay_transform_.R * qv + live_overlay_transform_.t;
+                        if (p_cam[2] <= 0.05) continue;  // behind or at the camera -- not projectable
+                        const cv::Point2d px = bev::radarcam::project_pinhole(K, cv::Point3d(p_cam[0], p_cam[1], p_cam[2]));
+                        if (px.x < 0 || px.y < 0 || px.x >= radar_overlay.cols || px.y >= radar_overlay.rows) continue;
+                        cv::circle(radar_overlay, cv::Point(static_cast<int>(px.x), static_cast<int>(px.y)), 5,
+                            cv::Scalar(38, 89, 217), 2, cv::LINE_AA);
+                    }
+                    cv::Mat radar_overlay_small;
+                    cv::resize(radar_overlay, radar_overlay_small, cv::Size(), 0.4, 0.4, cv::INTER_AREA);
+                    show_diagnostic_image(radar_overlay_small);
                 }
             }
         }
@@ -789,6 +834,7 @@ private:
         msg += saved ? QString(" Saved to %1.").arg(output_extrinsics_path_->text())
                      : QString(" Save failed: %1.").arg(QString::fromStdString(save_error));
         status_label_->setText(msg);
+        apply_ui_state();
     }
 
     // ---------------------------------------------------------------------------------------
@@ -821,6 +867,8 @@ private:
 
         const int n_holdout = std::max(1, static_cast<int>(loaded.size() * config_.holdout_fraction));
         std::vector<bev::radarcam::HeldoutInput> heldout;
+        std::vector<size_t> heldout_loaded_indices;  // index into `loaded`, parallel to `heldout` -- so the
+                                                      // worst-residual overlay below can find its source image
         for (size_t i = loaded.size() - static_cast<size_t>(n_holdout); i < loaded.size(); ++i) {
             const auto& lc = loaded[i];
             const cv::Point3d q_hat =
@@ -832,6 +880,7 @@ private:
                 hi.p_camera = lc.board.p_camera;
                 hi.q_radar = filtered.q_radar;
                 heldout.push_back(hi);
+                heldout_loaded_indices.push_back(i);
             }
         }
         if (heldout.empty()) {
@@ -840,6 +889,35 @@ private:
         }
 
         const auto stats = bev::radarcam::compute_heldout_residuals(heldout, last_solve_transform_, effective_camera_matrix());
+
+        // Overlay the worst-residual held-out capture on its actual image (render_reprojection_overlay,
+        // diagnostics_render.hpp) so a bad RMS is visible directly, not just a number.
+        const cv::Matx33d K = effective_camera_matrix();
+        int worst_k = -1;
+        double worst_residual_m = -1.0;
+        for (size_t k = 0; k < heldout.size(); ++k) {
+            const cv::Vec3d qv(heldout[k].q_radar.x, heldout[k].q_radar.y, heldout[k].q_radar.z);
+            const cv::Vec3d predicted = last_solve_transform_.R * qv + last_solve_transform_.t;
+            const double r = cv::norm(cv::Point3d(predicted[0], predicted[1], predicted[2]) - heldout[k].p_camera);
+            if (r > worst_residual_m) {
+                worst_residual_m = r;
+                worst_k = static_cast<int>(k);
+            }
+        }
+        QString overlay_note;
+        if (worst_k >= 0) {
+            const auto& worst_capture = loaded[heldout_loaded_indices[static_cast<size_t>(worst_k)]].capture;
+            const cv::Vec3d qv(heldout[worst_k].q_radar.x, heldout[worst_k].q_radar.y, heldout[worst_k].q_radar.z);
+            const cv::Vec3d predicted = last_solve_transform_.R * qv + last_solve_transform_.t;
+            const cv::Point2d measured_px = bev::radarcam::project_pinhole(K, heldout[worst_k].p_camera);
+            const cv::Point2d predicted_px =
+                bev::radarcam::project_pinhole(K, cv::Point3d(predicted[0], predicted[1], predicted[2]));
+            show_diagnostic_image(bev::radarcam::render_reprojection_overlay(worst_capture.image, measured_px, predicted_px));
+            overlay_note = QString(" | Overlay: %1 (worst held-out, residual %2m).")
+                               .arg(QString::fromStdString(worst_capture.capture_id))
+                               .arg(worst_residual_m, 0, 'f', 3);
+        }
+
         QString msg = QString("Validate (n=%1): 3D RMS %2m median %3m p95 %4m | reprojection RMS %5px median %6px p95 %7px.")
             .arg(stats.n_holdout)
             .arg(stats.rms_3d_m, 0, 'f', 4)
@@ -863,6 +941,7 @@ private:
         } else {
             msg += " | No homography loaded -- §9.2 ground-plane cross-check skipped.";
         }
+        msg += overlay_note;
         status_label_->setText(msg);
     }
 
@@ -883,6 +962,50 @@ private:
         inspect_btn_->setEnabled(intrinsics_loaded_);
         solve_btn_->setEnabled(intrinsics_loaded_ && !config_.gate_radii_m.empty());
         validate_btn_->setEnabled(has_solve_);
+        live_overlay_toggle_->setEnabled(intrinsics_loaded_);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Live overlay: loads a saved extrinsics.yaml (independent of an in-session Solve) plus the
+    // intrinsics/homography already in memory, then projects raw radar detections onto the live
+    // preview every tick (see on_frame_tick) as a real-time calibration sanity check.
+    // ---------------------------------------------------------------------------------------
+
+    void start_live_overlay() {
+        if (!intrinsics_loaded_) {
+            status_label_->setText("Live Overlay needs intrinsics loaded first.");
+            live_overlay_toggle_->blockSignals(true);
+            live_overlay_toggle_->setChecked(false);
+            live_overlay_toggle_->blockSignals(false);
+            return;
+        }
+        load_homography();  // optional -- not required for the overlay math itself, only for parity
+                             // with what Validate's ground-plane cross-check expects to have loaded
+
+        bev::radarcam::ExtrinsicsData extrinsics;
+        std::string error;
+        if (!bev::radarcam::load_extrinsics_yaml(output_extrinsics_path_->text().toStdString(), extrinsics, error)) {
+            status_label_->setText(QString("Live Overlay: failed to load extrinsics (%1)").arg(QString::fromStdString(error)));
+            live_overlay_toggle_->blockSignals(true);
+            live_overlay_toggle_->setChecked(false);
+            live_overlay_toggle_->blockSignals(false);
+            return;
+        }
+        live_overlay_transform_.R = extrinsics.R;
+        live_overlay_transform_.t = extrinsics.t;
+        live_overlay_enabled_ = true;
+        set_toggle_button_visual(live_overlay_toggle_, true);
+        status_label_->setText(QString("Live Overlay: loaded %1%2. Turn on Camera Preview + Radar Live to see it.")
+            .arg(output_extrinsics_path_->text())
+            .arg(homography_loaded_ ? " + homography" : " (no homography loaded)"));
+    }
+
+    void stop_live_overlay() {
+        live_overlay_enabled_ = false;
+        set_toggle_button_visual(live_overlay_toggle_, false);
+        live_overlay_toggle_->blockSignals(true);
+        live_overlay_toggle_->setChecked(false);
+        live_overlay_toggle_->blockSignals(false);
     }
 
     // ---------------------------------------------------------------------------------------
@@ -899,6 +1022,7 @@ private:
     QLineEdit* output_extrinsics_path_ = nullptr;
     QToolButton* camera_preview_toggle_ = nullptr;
     QToolButton* radar_live_toggle_ = nullptr;
+    QToolButton* live_overlay_toggle_ = nullptr;
     QPushButton* capture_btn_ = nullptr;
     QPushButton* inspect_btn_ = nullptr;
     QPushButton* solve_btn_ = nullptr;
@@ -937,4 +1061,9 @@ private:
 
     bev::radarcam::RigidTransform last_solve_transform_;
     bool has_solve_ = false;
+
+    bev::radarcam::RigidTransform live_overlay_transform_;  // loaded from output_extrinsics_path_ by
+                                                             // start_live_overlay(), independent of has_solve_
+    bool live_overlay_enabled_ = false;
+    int live_overlay_tick_counter_ = 0;  // throttles the redraw to every 3rd tick, see on_frame_tick
 };
